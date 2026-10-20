@@ -192,6 +192,7 @@ void MemoriaProcessor::setCurrentProgram (int i)
     curProgram = i;
     if (i < 1 || i > (int) memoria::presets().size()) return;
     const auto& pr = memoria::presets()[(size_t) i - 1];
+    engine.beginMorph();   // ручки плавно перетекают к новому пресету, смена режима идёт через мост
     auto set = [this] (const char* id, float v)
     {
         if (auto* par = apvts.getParameter (id)) par->setValueNotifyingHost (par->convertTo0to1 (v));

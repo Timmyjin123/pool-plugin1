@@ -621,7 +621,7 @@ struct Prism
             b[i] = Band();
             b[i].lo = lo[i]; b[i].hi = hi[i]; b[i].ph = (float) i * 1.3f;
             b[i].inc = (float) (2 * 3.14159265358979 * rateHz[i] / sr * 16);
-            b[i].k = 1.0f / (2.5f + (float) i * .6f);
+            b[i].k = 1.0f / (1.1f + (float) i * .25f);   // широкие пологие полосы: перелив, а не носовой резонанс
         }
         cnt = 0;
     }
@@ -639,6 +639,7 @@ struct Prism
                 q.a1 = 1 / (1 + q.g * (q.g + q.k)); q.a2 = q.g * q.a1; q.a3 = q.g * q.a2;
             }
         }
+        static const float wt[5] = { 1.0f, 1.0f, .8f, .45f, .55f };   // присутствие (2–5 кГц) тише — не режет уши
         float in[2] = { L, R }, sum[2] = { 0, 0 };
         for (int i = 0; i < 5; ++i)
         {
@@ -651,11 +652,11 @@ struct Prism
                 q.ic1[c] = 2 * v1 - q.ic1[c]; q.ic2[c] = 2 * v2 - q.ic2[c];
                 // полосы чуть по-разному в каналах: шире стерео
                 const float pan = (i & 1) ? (c ? .75f : 1.0f) : (c ? 1.0f : .75f);
-                sum[c] += v1 * q.k * pan;
+                sum[c] += v1 * q.k * pan * wt[i];
             }
         }
-        L = in[0] * (1 - .55f * amt) + sum[0] * 2.2f * amt;
-        R = in[1] * (1 - .55f * amt) + sum[1] * 2.2f * amt;
+        L = in[0] * (1 - .4f * amt) + sum[0] * 1.15f * amt;
+        R = in[1] * (1 - .4f * amt) + sum[1] * 1.15f * amt;
     }
     float freq (int i) const { return b[i].f; }
 };
@@ -782,6 +783,13 @@ public:
         k.modM1 = (float) (11100.0 / kRef * sr);
         curMode = curSize = -1;
         xf = 0;
+        // мост при смене режима: последние ~1.2 с памяти, пока новый режим плавно входит, старый звук тает облаком
+        brLen = (int) (1.2 * sr); brL.assign ((size_t) brLen, 0.0f); brR.assign ((size_t) brLen, 0.0f); brW = 0;
+        brFrozen = false; brEnv = 0; outLin = 0; brG = (int) (.38 * sr);
+        for (int j = 0; j < 2; ++j) { brPh[j] = j * brG / 2; brSt[j][0] = brSt[j][1] = 0; }
+        k.outIn = (float) (1.0 / (1.3 * sr)); k.brDecay = (float) std::exp (-1.0 / (1.6 * sr)); k.brSlow = (float) std::exp (-1.0 / (9.0 * sr));
+        k.brFollow = (float) (1.0 / (1.2 * sr)); k.brE = (float) (1.0 / (.35 * sr));
+        k.morph = rate (.00004, sr); morphLeft = 0;
         dir = 1;
         pendingErase = false;
         for (int c = 0; c < 2; ++c) { gate[c] = 1; rg[c] = 1; envF[c] = envS[c] = 0; }
@@ -794,7 +802,7 @@ public:
         auto op = [this] (double fc) { return (float) (1.0 - std::exp (-2.0 * 3.141592653589793 * fc / sr)); };
         k.b700 = op (700); k.b150 = op (150); k.b2500 = op (2500); k.b1500 = op (1500); k.b4000 = op (4000);
         k.t1500 = op (1500); k.t400 = op (400); k.t1000 = op (1000); k.pp = op (2800); k.tank = op (2500);
-        k.b100 = op (100); k.b3000 = op (3000); k.b7000 = op (7000); k.b11000 = op (11000); k.up = op (5500);
+        k.b100 = op (100); k.b3000 = op (3000); k.b7000 = op (7000); k.b11000 = op (11000); k.up = op (3600); k.crLp = op (3800); k.crEnv = op (20);
         k.sub = op (180); k.shelf = op (200); k.tilt = op (900); k.dc = op (8); k.dcOut = op (16);
         dcOut[0] = dcOut[1] = 0;
         k.limAtkOut = rate (.35, sr); k.limRelOut = (float) (1.0 - std::exp (-1.0 / (.25 * sr)));
@@ -802,6 +810,9 @@ public:
         subShift2.prepare (sr, .12, .030, .014);
         k.bass = op (400); k.sub2 = op (90); k.monoLo = op (120);
         k.cl300 = op (300); k.cl3000 = op (3000);
+        k.bx[0] = op (250); k.bx[1] = op (800); k.bx[2] = op (2500); k.bx[3] = op (6000);
+        k.balE = (float) (1.0 / (2.5 * sr)); k.balG = (float) (1.0 / (1.5 * sr));
+        k.glDet = (float) (1.0 / (.012 * sr)); k.glAtk = (float) (1.0 / (.018 * sr)); k.glRel = (float) (1.0 / (.32 * sr)); k.glHp = op (120); k.glAvg = (float) (1.0 / (3.0 * sr));
         auto tc = [this] (double sec) { return (float) (1.0 - std::exp (-1.0 / (sec * sr))); };
         k.clEnv = tc (.05); k.clAtk = tc (.02); k.clRel = tc (.3);
         k.trFast = tc (.001); k.trSlow = tc (.04); k.trAtk = tc (.0005); k.trRel = tc (.03);
@@ -839,11 +850,12 @@ public:
     {
         const bool wantLayout = p.mode != curMode || p.size != curSize;
         if (eraseReq.exchange (false)) pendingErase = true;
+        if (morphReq.exchange (false)) morphLeft = (int) (1.2 * sr);
         const bool wantDir = (p.reverse ? -1 : 1) != dir;
         bool want = wantLayout || wantDir || pendingErase;
 
         const int lc = std::clamp (p.lowcut, 0, 3), hc = std::clamp (p.highcut, 0, 3);
-        static const float LC_A[3] = { .035f, .06f, .1f }, LC_G[3] = { 1.035f, 1.04f, 1.063f };
+        static const float LC_A[3] = { .014f, .045f, .1f }, LC_G[3] = { 1.012f, 1.037f, 1.063f };   // первая степень мягкая (~100 Гц): низ не истончается
         static const float HC_B[3] = { .5f, .15f, .08f }, HC_G[3] = { 1.002f, 1.01f, 1.033f }, HC_S[3] = { .001f, .025f, .03f };
         if (lc > 0) { lcA = rate (LC_A[lc - 1], sr); lcG = LC_G[lc - 1]; }
         if (hc > 0) { hcB = rate (HC_B[hc - 1], sr); hcG = HC_G[hc - 1]; hcS = HC_S[hc - 1]; }
@@ -892,6 +904,8 @@ public:
             // ---- переходы: смена режима, размера, направления, стирание
             if (want)
             {
+                if (! brFrozen && ! pendingErase && outLin > .5f) { brFrozen = true; brEnv = 1; }
+                if (pendingErase) brEnv = 0;
                 xf -= k.fade;
                 if (xf <= 0)
                 {
@@ -903,27 +917,42 @@ public:
                 }
             }
             else if (xf < 1) xf = std::min (1.0f, xf + k.fade);
+            if (want) outLin = std::min (outLin, xf);
+            else
+            {
+                outLin = std::min (1.0f, outLin + (brEnv > 0 ? k.outIn : k.fade));
+                // старый звук держится, пока новый режим не наберёт силу (новые линии могут быть ещё пусты)
+                if (brFrozen)
+                {
+                    const float t = std::clamp (1.2f - 1.4f * std::sqrt (brNewE / (brRefE + 1e-9f)), 0.0f, 1.0f);
+                    brEnv = std::min (brEnv * k.brSlow, brEnv + (t - brEnv) * k.brFollow);
+                }
+                if (brFrozen && brEnv < 1e-3f && outLin >= 1) { brFrozen = false; brEnv = 0; }
+            }
 
             // ---- сглаживание ручек
-            sDecay += (p.decay - sDecay) * k.smooth;
-            sWarm += (p.warmth - sWarm) * k.smooth;
-            sDyn += (p.dynamics - sDyn) * k.smooth;
-            sSpread += (p.spread - sSpread) * k.smooth;
-            sDrift += (p.drift - sDrift) * k.smooth;
-            sMix += (p.mix - sMix) * k.smooth;
-            sOut += (p.out - sOut) * k.smooth;
+            // при смене пресета ручки плывут к новым значениям ~1 с, а не прыгают
+            if (morphLeft > 0) --morphLeft;
+            const float ks = morphLeft > 0 ? k.morph : k.smooth;
+            sDecay += (p.decay - sDecay) * ks;
+            sWarm += (p.warmth - sWarm) * ks;
+            sDyn += (p.dynamics - sDyn) * ks;
+            sSpread += (p.spread - sSpread) * ks;
+            sDrift += (p.drift - sDrift) * ks;
+            sMix += (p.mix - sMix) * ks;
+            sOut += (p.out - sOut) * ks;
             chFade += ((chPending ? 0.0f : 1.0f) - chFade) * k.chFade;
-            sLay += (p.layers - sLay) * k.smooth;
-            sPP += (p.pingpong - sPP) * k.smooth;
-            sTone += (p.tone - sTone) * k.smooth;
-            sDepth += (p.depth - sDepth) * k.smooth;
-            sChaos += (p.chaos - sChaos) * k.smooth;
-            sCore += (p.core - sCore) * k.smooth;
-            sRuin += (p.ruin - sRuin) * k.smooth;
-            sSpace += (p.space - sSpace) * k.smooth;
-            sShim += (p.shimmer - sShim) * k.smooth;
+            sLay += (p.layers - sLay) * ks;
+            sPP += (p.pingpong - sPP) * ks;
+            sTone += (p.tone - sTone) * ks;
+            sDepth += (p.depth - sDepth) * ks;
+            sChaos += (p.chaos - sChaos) * ks;
+            sCore += (p.core - sCore) * ks;
+            sRuin += (p.ruin - sRuin) * ks;
+            sSpace += (p.space - sSpace) * ks;
+            sShim += (p.shimmer - sShim) * ks;
             const float prT = p.prism >= 0 ? p.prism : std::max (0.0f, p.drift - .25f) * .8f;   // DRIFT двигает и спектр
-            sPrism += (prT - sPrism) * k.smooth;
+            sPrism += (prT - sPrism) * ks;
             // TAIL под капотом: срезы гуляют с DRIFT, а без игры хвост постепенно темнеет и истончается
             {
                 const float pf = std::min (1.0f, std::max (envS[0], envS[1]) * 6.0f);
@@ -1021,6 +1050,7 @@ public:
             float wl = 0, wr = 0;
             layerStage (wl, wr);
             wl += sigL; wr += sigR; sigL = sigR = 0;
+            bridge (wl, wr);
             blurStage (wl, wr);
             chaosSt.process (wl, wr, sChaos);   // всегда в цепи: включение CHAOS не сдвигает сигнал и не щёлкает
             if (sRuin > 1e-4f) { const float fl = sRuin * sRuin * .006f; wl += fl * hiss[0]; wr += fl * hiss[1]; }
@@ -1046,6 +1076,7 @@ public:
             if (sPrism > 1e-4f) prism.process (wl, wr, sPrism, sDrift);
             clarity (wl, wr);
             organism.process (wl, wr, orgSel, playF, .5f * (dryL + dryR));
+            balance (wl, wr);
             depthTone (wl, wr, .5f * (dryL + dryR));
             // TAIL: фильтр хвостов, 24 дБ/окт снизу и сверху
             {
@@ -1059,6 +1090,7 @@ public:
                 }
                 wl = x[0]; wr = x[1];
             }
+            glue (wl, wr);
             wl *= 2.0f; wr *= 2.0f;   // подъём уровня мокрого сигнала (выходной лимитер держит пики)
             // автогромкость под капотом: если мокрый сигнал долго громче нормы (≈ −15 дБ), он плавно уходит тише (до −6 дБ)
             {
@@ -1070,8 +1102,8 @@ public:
                 wl *= agcG; wr *= agcG;
             }
 
-            float oL = wl * xf * sMix + dryL * (1 - sMix);
-            float oR = wr * xf * sMix + dryR * (1 - sMix);
+            float oL = wl * sMix + dryL * (1 - sMix);
+            float oR = wr * sMix + dryR * (1 - sMix);
             monoAmt += ((p.mono ? 1.0f : 0.0f) - monoAmt) * k.smooth;
             if (monoAmt > 1e-4f) { const float m = (oL + oR) * .5f; oL += monoAmt * (m - oL); oR += monoAmt * (m - oR); }
             oL = warm (oL, wd) * sOut;
@@ -1102,7 +1134,7 @@ public:
         std::atomic<int> nLayers { 0 };
         std::atomic<int> chaosType { 0 }, erodeCount { 0 };
         std::atomic<float> chaosEnv { 0 }, ruin { 0 }, chaos { 0 }, lastErode { -1 };
-        std::atomic<float> space { 0 }, revLvl { 0 }, prism { 0 }, core { .5f }, breath { 1 };
+        std::atomic<float> glue { 0 }, space { 0 }, revLvl { 0 }, prism { 0 }, core { .5f }, breath { 1 };
         std::atomic<int> organism { 1 };
         std::array<std::atomic<float>, 4> lSwell {};
         std::array<std::atomic<float>, 5> prismF {};
@@ -1111,7 +1143,7 @@ public:
     } viz;
 
 private:
-    struct LBand { float s1 = 0, s2 = 0, s3 = 0, held = 0; int hold = 0; };
+    struct LBand { float s1 = 0, s2 = 0, s3 = 0, held = 0, env = 0, cl = 0, s4 = 0; int hold = 0; };
     struct Deg
     {
         float lp1 = 0, lp2 = 0, env = 0, bloom = 1, lp3 = 0, dc = 0, held = 0;
@@ -1395,6 +1427,34 @@ private:
         addLayer (t1, .25f * sLay, .55f * sLay);
     }
 
+    // мост: новый режим входит по косинусу, а последние мгновения старого играют замёрзшими гранулами и тают
+    void bridge (float& wl, float& wr)
+    {
+        const float gNew = .5f - .5f * std::cos (3.14159265f * outLin);
+        const float e2 = .5f * (wl * wl + wr * wr);
+        if (! brFrozen)
+        {
+            brPreE += (e2 - brPreE) * k.brE;
+            brRefE = brPreE; brNewE = 0;
+            brL[(size_t) brW] = wl; brR[(size_t) brW] = wr;
+            if (++brW >= brLen) brW = 0;
+            wl *= gNew; wr *= gNew;
+            return;
+        }
+        if (outLin > 0) brNewE += (e2 - brNewE) * k.brE;
+        float bl = 0, br = 0;
+        for (int j = 0; j < 2; ++j)
+        {
+            if (++brPh[j] >= brG) { brPh[j] = 0; for (int c = 0; c < 2; ++c) brSt[j][c] = (int) (brRng.uni() * (float) (brLen - brG - 1)); }
+            const float wnd = .5f - .5f * std::cos (6.2831853f * (float) brPh[j] / (float) brG);
+            bl += wnd * brL[(size_t) ((brW + brSt[j][0] + brPh[j]) % brLen)];
+            br += wnd * brR[(size_t) ((brW + brSt[j][1] + brPh[j]) % brLen)];
+        }
+        const float gOld = brEnv * std::sqrt (std::max (0.0f, 1 - gNew * gNew));
+        wl = wl * gNew + bl * gOld;
+        wr = wr * gNew + br * gOld;
+    }
+
     void addLayer (float x, float gl, float gr)
     {
         if (ln >= 4) return;
@@ -1418,8 +1478,14 @@ private:
             case 1: return warm (x * 1.3f, .8f);
             case 2: return std::sin (1.7f * x) * (1.1f / 1.7f);
             case 3:
-                if (++b.hold >= k.crushN) { b.hold = 0; b.held = std::round (x * 64.0f) / 64.0f; }
-                return .5f * (x + b.held);
+            {
+                // «старое железо»: шаг квантования идёт за громкостью (тихое не превращается в шипение),
+                // ступеньки сглажены фильтром — зерно слышно, а цифровой грязи на середине нет
+                b.env += (std::fabs (x) - b.env) * k.crEnv;
+                if (++b.hold >= k.crushN) { b.hold = 0; const float q = 1.0f / (b.env * .09f + 1e-5f); b.held = std::round (x * q) / q; }
+                b.cl += (b.held - b.cl) * k.crLp;
+                return .55f * x + .45f * b.cl;
+            }
             default: return x;
         }
     }
@@ -1439,7 +1505,11 @@ private:
                 if (ch[j].semis != 0)
                 {
                     float shv = sh;
-                    if (ch[j].semis > 0) { lband[j].s3 += (sh - lband[j].s3) * k.up; shv = lband[j].s3; }   // сдвиг вверх без жёсткого верха
+                    if (ch[j].semis > 0)   // сдвиг вверх: тише и темнее, как обертон, а не второй голос — середина не забивается
+                    {
+                        lband[j].s3 += (sh - lband[j].s3) * k.up; lband[j].s4 += (lband[j].s3 - lband[j].s4) * k.up;
+                        shv = lband[j].s4 * (ch[j].semis > 12 ? .55f : .72f);
+                    }
                     y += la * (shv - y);
                 }
                 y += la * (bandFilter (lband[j], ch[j].band, y) - y);
@@ -1497,7 +1567,7 @@ private:
         const float target = .35f;
         const float gT = ratio > target ? std::max (.5f, std::sqrt (target / ratio)) : 1.0f;
         gMid += (gT - gMid) * (gT < gMid ? k.clAtk : k.clRel);
-        const float gm = 1.0f - amt * (1.0f - gMid * .92f);             // плюс постоянный лёгкий провал −0.7 дБ
+        const float gm = 1.0f - .35f * amt * (1.0f - gMid);   // основную работу по середине делает balance()
         // мягкие атаки: быстрая огибающая против медленной
         const float a = std::max (std::fabs (x[0]), std::fabs (x[1]));
         tFast += (a - tFast) * k.trFast; tSlow += (a - tSlow) * k.trSlow;
@@ -1506,6 +1576,71 @@ private:
         const float gt = 1.0f - amt * .7f * (1.0f - gTr);
         for (int c = 0; c < 2; ++c) x[c] = (x[c] + (gm - 1.0f) * mid[c]) * gt;
         wl = x[0]; wr = x[1];
+    }
+
+    // BALANCE под капотом: мокрый сигнал медленно подводится к «глубокой» тональной кривой —
+    // плотность энергии падает ~5.5 дБ на октаву (как у далёкого звука) выше 250 Гц, поэтому середина и верх не выпирают,
+    // а хвост ложится в микс одинаково, что бы ни играло. Полосы складываются обратно без искажений (1-полюсные дополнения).
+    void balance (float& wl, float& wr)
+    {
+        static const float orgB[5] = { .4f, .85f, .85f, .7f, .95f }, orgS[5] = { 4.5f, 5.5f, 5.0f, 4.0f, 6.5f };
+        const float amt = orgB[orgSel], sl = orgS[orgSel];
+        float bnd[2][5];
+        const float x[2] = { wl, wr };
+        for (int c = 0; c < 2; ++c)
+        {
+            float r = x[c];
+            for (int b = 0; b < 4; ++b) { balLp[c][b] += (r - balLp[c][b]) * k.bx[b]; bnd[c][b] = balLp[c][b]; r -= balLp[c][b]; }
+            bnd[c][4] = r;
+        }
+        for (int b = 1; b < 5; ++b) balE[b] += (.5f * (bnd[0][b] * bnd[0][b] + bnd[1][b] * bnd[1][b]) - balE[b]) * k.balE;
+        // ширина полос в октавах и центры (для плотности на октаву): 250–800, 800–2.5k, 2.5k–6k, 6k–16k
+        static const float widthOct[5] = { 1, 1.68f, 1.64f, 1.26f, 1.42f };
+        static const float centreOct[5] = { 0, 0, 1.66f, 3.11f, 4.45f };   // от середины полосы 250–800
+        // прямая с наклоном −5.5 дБ/окт, проведённая через все четыре полосы: горбы срезаются, провалы чуть заполняются
+        if (++balCnt >= 32)   // цели пересчитываются раз в 32 сэмпла: дёшево, а гладкость даёт сглаживание усилений
+        {
+        balCnt = 0;
+        float d[5], off = 0;
+        const bool live = balE[1] + balE[2] > 1e-9f;
+        for (int b = 1; b < 5; ++b) { d[b] = 10.0f * std::log10 (balE[b] / widthOct[b] + 1e-14f); off += d[b] + sl * centreOct[b]; }
+        off *= .25f;
+        for (int b = 1; b < 5; ++b)
+        {
+            const float errDb = d[b] - (off - sl * centreOct[b]);   // плюс = выпирает
+            balT[b] = live ? std::pow (10.0f, std::clamp (-errDb * amt, -8.0f, 3.0f) / 20.0f) : 1.0f;
+        }
+        }
+        for (int b = 1; b < 5; ++b) balGn[b] += (balT[b] - balGn[b]) * k.balG;
+        float y[2];
+        for (int c = 0; c < 2; ++c) y[c] = bnd[c][0] + balGn[1] * bnd[c][1] + balGn[2] * bnd[c][2] + balGn[3] * bnd[c][3] + balGn[4] * bnd[c][4];
+        wl = y[0]; wr = y[1];
+    }
+
+    // GLUE под капотом: мягкий шинный компрессор на мокром сигнале — всё звучит одним телом.
+    // Детектор глухой к сабу (не качает низ), колено мягкое, отпускание медленное; сила — от организма.
+    void glue (float& wl, float& wr)
+    {
+        static const float orgG[5] = { .45f, 1.0f, 1.2f, .7f, .9f };
+        const float amt = orgG[orgSel];
+        const float m = .5f * (wl + wr);
+        glHp += (m - glHp) * k.glHp;
+        const float hp = m - glHp, sd = .5f * (wl - wr);
+        glDet += (hp * hp + .5f * sd * sd - glDet) * k.glDet;
+        if (++glCnt < 8) { wl *= glG; wr *= glG; return; }
+        glCnt = 0;
+        const float lev = 10.0f * std::log10 (glDet + 1e-12f);
+        // порог плывёт за средним уровнем (~3 с): ужимаются выбросы над телом звука при любой громкости входа
+        if (lev > -75.0f) glAvg += (lev - glAvg) * 8.0f * k.glAvg;
+        const float th = std::max (-48.0f, glAvg + 1.5f), knee = 8.0f, ratio = 1.0f + 1.6f * amt;
+        float over = lev - th, gr = 0;
+        if (over > knee * .5f) gr = over * (1 - 1 / ratio);
+        else if (over > -knee * .5f) { const float q = over + knee * .5f; gr = (1 - 1 / ratio) * q * q / (2 * knee); }
+        gr = std::min (gr, 10.0f);
+        glGr += (gr - glGr) * 8.0f * (gr > glGr ? k.glAtk : k.glRel);
+        glG = std::pow (10.0f, (-glGr + .35f * glGr * amt) / 20.0f);   // часть ужатия возвращается подъёмом
+        wl *= glG; wr *= glG;
+        viz.glue.store (glGr);
     }
 
     // DEPTH: саб −12 и −24 (только октавы — всегда в тональности), упругий: следует за игрой
@@ -1640,7 +1775,8 @@ private:
 
     struct Coefs
     {
-        float smooth = 0, fade = 0, recRate = 0, enRate = 0, limAtk = 0, limRel = 0, bloomDown = 0, bloomUp = 0;
+        float crLp = 0, crEnv = 0, bx[4] {}, balE = 0, balG = 0, glDet = 0, glAtk = 0, glRel = 0, glHp = 0, glAvg = 0;
+        float smooth = 0, outIn = 0, brDecay = 0, morph = 0, brSlow = 0, brFollow = 0, brE = 0, fade = 0, recRate = 0, enRate = 0, limAtk = 0, limRel = 0, bloomDown = 0, bloomUp = 0;
         float envAtk = 0, envFastRel = 0, envSlowRel = 0, gateUp = 0, gateDown = 0, lfoScale = 1, walk = 0, modM0 = 0, modM1 = 0;
         float b700 = 0, b150 = 0, b2500 = 0, b1500 = 0, b4000 = 0, t1500 = 0, t400 = 0, t1000 = 0, pp = 0, tank = 0, blur = 0;
         float b100 = 0, b3000 = 0, b7000 = 0, b11000 = 0, up = 0, sub = 0, shelf = 0, tilt = 0, limAtkOut = 0, limRelOut = 0, dc = 0, dcOut = 0;
@@ -1663,6 +1799,17 @@ private:
     GrainSet gL, gR, gS;
     float mod[2] {}, modInc[2] { .002112f, .0018099f };
     float xf = 0;
+    std::vector<float> brL, brR;
+    int brLen = 1, brW = 0, brG = 1, brPh[2] {}, brSt[2][2] {};
+    bool brFrozen = false;
+    float brEnv = 0, outLin = 0, brPreE = 0, brRefE = 0, brNewE = 0;
+    int morphLeft = 0;
+    Rng brRng { 0x1b873593u };
+    std::atomic<bool> morphReq { false };
+public:
+    // плавный переход к новому пресету: ручки плывут ~1 с (вызывается из любого потока)
+    void beginMorph() { morphReq.store (true); }
+private:
     bool pendingErase = false;
     std::atomic<bool> eraseReq { false };
 
@@ -1693,6 +1840,7 @@ private:
     bool tailLoOff = false, tailHiOff = false;
     int tailCnt = 0;
     // автокоррекция середины и мягкие атаки
+    float balLp[2][4] {}, balE[5] {}, balT[5] { 1, 1, 1, 1, 1 }, balGn[5] { 1, 1, 1, 1, 1 }, glHp = 0, glDet = 0, glGr = 0, glAvg = -40, glG = 1; int balCnt = 0, glCnt = 0;
     float clLp[2] {}, clHp[2] {}, eMid = 0, eAll = 0, gMid = 1, tFast = 0, tSlow = 0, gTr = 1;
     Rng ruinRng { 0x7f4a7c15u };
     float pinkB[2][3] {}, crackEnv[2] {}, crackAmp[2] {}, crackLp[2] {};
