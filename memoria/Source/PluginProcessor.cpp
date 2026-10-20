@@ -49,6 +49,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout MemoriaProcessor::makeLayout
     f01 ("depth", "Глубина: саб на октаву ниже и низ", .4f);
     f01 ("chaos", "Хаос: случайные сбои (warp, stutter, reverse, tape stop, dropout, shuffle)", 0);
     f01 ("ruin", "Руины: шипение, треск, эрозия памяти", 0);
+    f01 ("space", "Зал: размер и громкость реверба", .3f);
+    ps.push_back (std::make_unique<AudioParameterBool> (ParameterID { "shimmer", 1 }, U ("Шиммер: хвост поднимается на октаву"), false));
+    {
+        auto hz = AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
+            { return v >= 1000 ? String (v / 1000.0f, 1) + U (" кГц") : String (roundToInt (v)) + U (" Гц"); });
+        NormalisableRange<float> lo (20, 2000); lo.setSkewForCentre (200);
+        NormalisableRange<float> hi (500, 20000); hi.setSkewForCentre (3200);
+        ps.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "tailLo", 1 }, U ("Хвосты: срез низа"), lo, 40, hz));
+        ps.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "tailHi", 1 }, U ("Хвосты: срез верха"), hi, 16000, hz));
+    }
     ps.push_back (std::make_unique<AudioParameterChoice> (ParameterID { "harmony", 1 }, U ("Гармония слоёв: октавы / квинты / свободно"),
                                                           StringArray { "OCT", "5TH", "FREE" }, 0));
     return { ps.begin(), ps.end() };
@@ -107,6 +117,10 @@ void MemoriaProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBu
     p.chaos = val ("chaos");
     p.ruin = val ("ruin");
     p.harmony = (int) val ("harmony");
+    p.space = val ("space");
+    p.shimmer = val ("shimmer") > .5f ? .6f : 0.0f;
+    p.tailLo = val ("tailLo");
+    p.tailHi = val ("tailHi");
 
     float* l = buf.getWritePointer (0);
     float* r = buf.getWritePointer (1);
@@ -132,6 +146,7 @@ void MemoriaProcessor::setCurrentProgram (int i)
     set ("layers", pr.layers); set ("layerSeed", (float) pr.seed); set ("pingpong", pr.pingpong); set ("blur", pr.blur ? 1.0f : 0.0f);
     set ("tone", pr.tone); set ("depth", pr.depth); set ("reverse", pr.reverse ? 1.0f : 0.0f);
     set ("chaos", pr.chaos); set ("ruin", pr.ruin); set ("harmony", (float) pr.harmony);
+    set ("space", pr.space); set ("shimmer", pr.shimmer ? 1.0f : 0.0f); set ("tailLo", pr.tailLo); set ("tailHi", pr.tailHi);
 }
 
 void MemoriaProcessor::diceLayers()

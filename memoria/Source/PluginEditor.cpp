@@ -487,7 +487,7 @@ void MemoryRing::paint (juce::Graphics& g)
 
 // ============================================================ Editor
 MemoriaEditor::MemoriaEditor (MemoriaProcessor& p)
-    : AudioProcessorEditor (p), proc (p), ring (p), layerPanel (p),
+    : AudioProcessorEditor (p), proc (p), ring (p), layerPanel (p), tailRange (p),
       modeSeg (p, "mode", { "GRAINS", "DIFFUSE", "NETWORK", "TAPES" }, true),
       sizeSeg (p, "size", { "LONG", "MID", "SHORT" }, false),
       harmSeg (p, "harmony", { "OCT", "5TH", "FREE" }, false)
@@ -504,18 +504,19 @@ MemoriaEditor::MemoriaEditor (MemoriaProcessor& p)
     struct K { const char* id; const char* title; bool bip; };
     for (auto k : { K { "decay", "DECAY", false }, K { "warmth", "WARMTH", false }, K { "dynamics", "DYNAMICS", true },
                     K { "spread", "SPREAD", false }, K { "drift", "DRIFT", false }, K { "layers", "LAYERS", false },
-                    K { "pingpong", "PING-PONG", false }, K { "mix", "MIX", false }, K { "output", "OUTPUT", false },
+                    K { "pingpong", "PING-PONG", false }, K { "space", "SPACE", false }, K { "mix", "MIX", false }, K { "output", "OUTPUT", false },
                     K { "tone", "TONE", true }, K { "depth", "DEPTH", false }, K { "chaos", "CHAOS", false }, K { "ruin", "RUIN", false } })
         addAndMakeVisible (knobs.add (new Knob (p, k.id, k.title, k.bip)));
     knobs[2]->setTooltip (U ("Влево — память приглушается, пока играешь, и наплывает, когда перестаёшь. Вправо — тихие хвосты распускаются в ровный дрон."));
     knobs[3]->setTooltip (U ("Grains — разброс позиций гранул. Network и Tapes — сколько звука перетекает между линиями."));
-    knobs[4]->setTooltip (U ("Глубина медленных непериодичных LFO: движение гранул и плавающая панорама линий."));
+    knobs[4]->setTooltip (U ("Движение: медленные непериодичные LFO двигают гранулы, панораму линий и переливы спектра (PRISM)."));
     knobs[5]->setTooltip (U ("Слои: каждый слой получает свою полосу частот, сдвиг высоты, текстуру и место в стерео. В петле слои ещё и темнеют или светлеют по-своему."));
     knobs[6]->setTooltip (U ("Пинг-понг: у каждого слоя своя задержка, эхо прыгает между левым и правым каналом."));
-    knobs[9]->setTooltip (U ("Тон мокрого сигнала: влево темнее и мягче, вправо ярче."));
-    knobs[10]->setTooltip (U ("Глубина: саб-слой на октаву ниже и подъём низа."));
-    knobs[11]->setTooltip (U ("Хаос: иногда вмешиваются случайные сбои — звук плывёт, заикается, играет назад, останавливается как плёнка, проваливается, слои перетасовываются."));
-    knobs[12]->setTooltip (U ("Руины: шипение и треск записываются в память и стареют вместе с ней, куски памяти выветриваются, выше — петля теряет разрядность."));
+    knobs[7]->setTooltip (U ("Зал: плотный реверб с хвостом до 20 секунд, низ звучит дольше верха. Частоты хвостов — полоса TAIL справа."));
+    knobs[10]->setTooltip (U ("Тон мокрого сигнала: влево темнее и мягче, вправо ярче."));
+    knobs[11]->setTooltip (U ("Глубина: саб-слой на октаву ниже и подъём низа."));
+    knobs[12]->setTooltip (U ("Хаос: иногда вмешиваются случайные сбои — звук плывёт, заикается, играет назад, останавливается как плёнка, проваливается, слои перетасовываются."));
+    knobs[13]->setTooltip (U ("Руины: шипение и треск записываются в память и стареют вместе с ней, куски памяти выветриваются, выше — петля теряет разрядность."));
 
     const auto modeC = Pal::mode (0);
     addAndMakeVisible (chips.add (new Chip (p, "lowcut", "LO-CUT", Chip::Cycle, modeC)));
@@ -524,14 +525,15 @@ MemoriaEditor::MemoriaEditor (MemoriaProcessor& p)
     addAndMakeVisible (chips.add (new Chip (p, "freeze", "FREEZE", Chip::Toggle, Pal::ice())));
     addAndMakeVisible (chips.add (new Chip (p, "reverse", "REVERSE", Chip::Toggle, modeC)));
     addAndMakeVisible (chips.add (new Chip (p, "blur", "BLUR", Chip::Toggle, Pal::blur())));
-    addAndMakeVisible (chips.add (new Chip ("DICE", [this] { proc.diceLayers(); }, modeC)));
+    addAndMakeVisible (chips.add (new Chip (p, "shimmer", "SHIMMER", Chip::Toggle, Pal::ice())));
     addAndMakeVisible (chips.add (new Chip (p, "mono", "MONO", Chip::Toggle, modeC)));
     addAndMakeVisible (chips.add (new Chip ("ERASE", [this] { proc.erase(); }, Pal::warn())));
     chips[0]->setTooltip (U ("Срез низа в петле: каждый круг память становится тоньше (3 степени)"));
     chips[1]->setTooltip (U ("Срез верха с тёплой сатурацией в петле: каждый круг память темнеет (3 степени)"));
     chips[3]->setTooltip (U ("Заморозка: вход не пишется, память кружит без потерь"));
     chips[5]->setTooltip (U ("Размыть всё в облако. Размытое понемногу дописывается в память, и дрон со временем становится мягче."));
-    chips[6]->setTooltip (U ("Случайно перетасовать характеры слоёв (полоса, высота, текстура)"));
+    chips[6]->setTooltip (U ("Шиммер: хвост зала поднимается на октаву (в 5TH — на квинту) и каскадом уходит вверх. Работает вместе с SPACE."));
+    addAndMakeVisible (tailRange);
     chips[8]->setTooltip (U ("Стереть всю память"));
     addAndMakeVisible (layerPanel);
     layerPanel.setTooltip (U ("Характеры слоёв. Клик — перетасовать."));
@@ -558,7 +560,7 @@ void MemoriaEditor::timerCallback()
         for (auto* k : knobs) k->setAccent (c);
         sizeSeg.setAccent (c);
         harmSeg.setAccent (c);
-        for (int i : { 0, 1, 2, 4, 6, 7 }) chips[i]->setAccent (c);
+        for (int i : { 0, 1, 2, 4, 7 }) chips[i]->setAccent (c);
         repaint();
     }
     const int pr = proc.getCurrentProgram();
@@ -593,13 +595,14 @@ void MemoriaEditor::resized()
 
     layerPanel.setBounds (W - 268, 156, 214, 4 * 48);
     harmSeg.setBounds (W - 268, 116, 214, 30);
-    const int nb = 9, kw = 100, kx = (W - kw * nb) / 2;
+    const int nb = 10, kw = 92, kx = (W - kw * nb) / 2;
     for (int i = 0; i < nb; ++i) knobs[i]->setBounds (kx + i * kw, 416, kw, 100);
     // слева от кольца: TONE · DEPTH / CHAOS · RUIN
-    knobs[9]->setBounds (52, 196, 92, 96);
-    knobs[10]->setBounds (148, 196, 92, 96);
-    knobs[11]->setBounds (52, 300, 92, 96);
-    knobs[12]->setBounds (148, 300, 92, 96);
+    knobs[10]->setBounds (52, 196, 92, 96);
+    knobs[11]->setBounds (148, 196, 92, 96);
+    knobs[12]->setBounds (52, 300, 92, 96);
+    knobs[13]->setBounds (148, 300, 92, 96);
+    tailRange.setBounds (W - 268, 354, 214, 44);
 
     const int cw = 98, cg = 6, cx = (W - cw * chips.size() - cg * (chips.size() - 1)) / 2;
     for (int i = 0; i < chips.size(); ++i) chips[i]->setBounds (cx + i * (cw + cg), 540, cw, 32);
@@ -646,4 +649,86 @@ void LayerPanel::paint (juce::Graphics& g)
         g.setColour (col.withAlpha (.8f * act));
         g.fillRoundedRectangle (r.getX() + 10, r.getBottom() - 5, (r.getWidth() - 20) * lvl, 2, 1);
     }
+}
+
+// ============================================================ TailRange
+static float hzToX (float hz, float w) { return std::log (hz / 20.0f) / std::log (1000.0f) * w; }
+static float xToHz (float x, float w) { return 20.0f * std::pow (1000.0f, juce::jlimit (0.0f, 1.0f, x / w)); }
+
+TailRange::TailRange (MemoriaProcessor& p) : proc (p)
+{
+    lo = proc.apvts.getParameter ("tailLo");
+    hi = proc.apvts.getParameter ("tailHi");
+    attLo = std::make_unique<juce::ParameterAttachment> (*lo, [this] (float) { repaint(); }, nullptr);
+    attHi = std::make_unique<juce::ParameterAttachment> (*hi, [this] (float) { repaint(); }, nullptr);
+    setTooltip (U ("Частоты хвостов: левая точка срезает низ, правая — верх. Двойной клик — сброс. Светлые точки — полосы PRISM (их движение задаёт DRIFT)."));
+    startTimerHz (20);
+}
+
+juce::Rectangle<float> TailRange::bar() const { return getLocalBounds().toFloat().withTrimmedTop (18).reduced (6, 6); }
+
+void TailRange::mouseDown (const juce::MouseEvent& e)
+{
+    const auto b = bar();
+    const float xl = b.getX() + hzToX (lo->convertFrom0to1 (lo->getValue()), b.getWidth());
+    const float xh = b.getX() + hzToX (hi->convertFrom0to1 (hi->getValue()), b.getWidth());
+    dragLo = std::fabs ((float) e.x - xl) < std::fabs ((float) e.x - xh);
+    (dragLo ? attLo : attHi)->beginGesture();
+    mouseDrag (e);
+}
+void TailRange::mouseDrag (const juce::MouseEvent& e)
+{
+    const auto b = bar();
+    float hz = xToHz ((float) e.x - b.getX(), b.getWidth());
+    if (dragLo) attLo->setValueAsPartOfGesture (juce::jlimit (20.0f, 2000.0f, hz));
+    else attHi->setValueAsPartOfGesture (juce::jlimit (500.0f, 20000.0f, hz));
+}
+void TailRange::mouseUp (const juce::MouseEvent&) { (dragLo ? attLo : attHi)->endGesture(); }
+void TailRange::mouseDoubleClick (const juce::MouseEvent&)
+{
+    attLo->setValueAsCompleteGesture (40.0f);
+    attHi->setValueAsCompleteGesture (16000.0f);
+}
+
+void TailRange::paint (juce::Graphics& g)
+{
+    auto& v = proc.getEngine().viz;
+    const auto acc = Pal::mode (v.mode.load());
+    const auto b = bar();
+    const float flo = lo->convertFrom0to1 (lo->getValue()), fhi = hi->convertFrom0to1 (hi->getValue());
+    const float xl = b.getX() + hzToX (flo, b.getWidth()), xh = b.getX() + hzToX (fhi, b.getWidth());
+    auto fmt = [] (float f) { return f >= 1000 ? juce::String (f / 1000.0f, 1) + "k" : juce::String (juce::roundToInt (f)); };
+
+    g.setColour (Pal::dim()); g.setFont (F (11, true, .14f));
+    g.drawText ("TAIL", getLocalBounds().removeFromTop (16).withTrimmedLeft (6), juce::Justification::centredLeft);
+    g.setColour (Pal::text().withAlpha (.8f)); g.setFont (F (11));
+    g.drawText ((flo <= 20.5f ? juce::String ("20") : fmt (flo)) + U (" Гц – ") + (fhi >= 19500 ? juce::String ("20k") : fmt (fhi)),
+                getLocalBounds().removeFromTop (16).withTrimmedRight (6), juce::Justification::centredRight);
+
+    g.setColour (Pal::panel()); g.fillRoundedRectangle (b, 6);
+    // полоса пропускания
+    juce::ColourGradient gr (acc.withAlpha (.05f), xl, 0, acc.withAlpha (.05f), xh, 0, false);
+    gr.addColour (.5, acc.withAlpha (.22f));
+    g.setGradientFill (gr);
+    g.fillRoundedRectangle (juce::Rectangle<float> (xl, b.getY(), juce::jmax (2.0f, xh - xl), b.getHeight()), 6);
+    // деления октав
+    g.setColour (Pal::line());
+    for (float f : { 100.0f, 1000.0f, 10000.0f }) g.drawVerticalLine ((int) (b.getX() + hzToX (f, b.getWidth())), b.getY() + 3, b.getBottom() - 3);
+    // полосы PRISM
+    const float pr = v.prism.load();
+    for (int j = 0; j < 5; ++j)
+    {
+        const float f = v.prismF[(size_t) j].load();
+        if (f <= 0) continue;
+        const float x = b.getX() + hzToX (f, b.getWidth());
+        const bool inside = x >= xl && x <= xh;
+        g.setColour (juce::Colours::white.withAlpha ((.15f + .7f * pr) * (inside ? 1.0f : .3f)));
+        g.fillEllipse (juce::Rectangle<float> (5, 5).withCentre ({ x, b.getCentreY() }));
+    }
+    // точки-ручки
+    for (float x : { xl, xh })
+    {
+        g.setColour (acc); g.fillRoundedRectangle (juce::Rectangle<float> (4, b.getHeight() + 4).withCentre ({ x, b.getCentreY() }), 2);
+    }
+    g.setColour (Pal::line()); g.drawRoundedRectangle (b, 6, 1);
 }

@@ -1,6 +1,7 @@
 // Автономный тест движка Memoria (без JUCE):
 //   g++ -O2 -std=c++17 memoria/tests/engine_test.cpp -o /tmp/mt && /tmp/mt
 #include "../Source/MemEngine.h"
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <string>
@@ -34,6 +35,7 @@ struct Run
             {
                 float x = 0;
                 if (signal == 1) x = (float) (.3 * std::sin (ph) + .02 * rg.bi());
+                if (signal == 3) x = .2f * rg.bi();   // белый шум
                 if (signal == 2) { const double t = std::fmod (ph / (2 * M_PI * 220.0) , .5); x = (float) (.5 * std::exp (-t * 30) * std::sin (ph * 1.5)); }
                 ph += 2 * M_PI * 220.0 / sr;
                 il[(size_t) i] = x; ir[(size_t) i] = x * .8f;
@@ -112,7 +114,7 @@ int main()
         auto energyAt = [&] (float layers, double f)
         {
             Run r (sr); r.p.mode = 2; r.p.size = 2; r.p.mix = 1; r.p.decay = .6f; r.p.highcut = 0; r.p.lowcut = 0;
-            r.p.layers = layers; r.p.layerSeed = 0; r.p.warmth = 0;
+            r.p.layers = layers; r.p.layerSeed = 0; r.p.warmth = 0; r.p.depth = 0;   // мерим только слои
             std::vector<float> cap;
             r.run (6, 1);
             r.run (3, 1, &cap);
@@ -174,6 +176,103 @@ int main()
         std::printf ("  доля чужих нот: OCT %.3f, FREE %.3f\n", worst, freeWorst);
         CHECK (worst < .05, "OCT: чужие ноты не появляются ни на одном наборе");
         CHECK (freeWorst > worst * 3, "FREE действительно добавляет другие интервалы (проверка теста)");
+    }
+
+    std::printf ("== SPACE, SHIMMER, PRISM\n");
+    {
+        // длина хвоста зала: щелчок → через сколько секунд уровень падает на 30 дБ (decay памяти = 0, чтобы мерить только зал)
+        auto tail30 = [&] (float space)
+        {
+            Run r (sr); r.p.mode = 3; r.p.size = 2; r.p.mix = 1; r.p.decay = 0; r.p.space = space; r.p.depth = 0;
+            Engine& e = r.e; const int B = 256;
+            std::vector<float> il (B, 0.0f), ol (B), orr (B);
+            for (int i = 0; i < 8; ++i) { std::fill (il.begin(), il.end(), 0.0f); if (i == 0) il[0] = .9f; e.process (il.data(), il.data(), ol.data(), orr.data(), B, r.p); }
+            // энергия огибающей по 100 мс
+            std::vector<double> env;
+            std::fill (il.begin(), il.end(), 0.0f);
+            double acc = 0; int n = 0;
+            for (int b = 0; b < (int) (40 * sr / B); ++b)
+            {
+                e.process (il.data(), il.data(), ol.data(), orr.data(), B, r.p);
+                for (int i = 0; i < B; ++i) { acc += (double) ol[(size_t) i] * ol[(size_t) i]; if (++n == (int) (.1 * sr)) { env.push_back (acc); acc = 0; n = 0; } }
+            }
+            double peak = 0; size_t pi = 0;
+            for (size_t i = 0; i < env.size(); ++i) if (env[i] > peak) { peak = env[i]; pi = i; }
+            for (size_t i = pi; i < env.size(); ++i) if (env[i] < peak * 1e-3) return (double) (i - pi) * .1;
+            return 40.0;
+        };
+        const double t1 = tail30 (.2f), t2 = tail30 (.6f), t3 = tail30 (1.0f);
+        std::printf ("  хвост −30 дБ: space .2 → %.1f с, .6 → %.1f с, 1.0 → %.1f с\n", t1, t2, t3);
+        CHECK (t1 < t2 && t2 < t3 && t3 > 6, "SPACE удлиняет хвост, на максимуме — больше 6 секунд");
+
+        Run r (sr); r.p.mode = 1; r.p.size = 0; r.p.mix = 1; r.p.decay = .95f; r.p.space = 1; r.p.shimmer = 1; r.p.prism = 1; r.p.layers = 1; r.p.blur = true;
+        const auto t0 = std::chrono::steady_clock::now();
+        r.run (10, 1);
+        const double early = r.run (10, 0);
+        const double late = r.run (20, 0);
+        const double secs = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+        std::printf ("  шиммер на максимуме: хвост %.3f → %.3f, пик %.3f, cpu %.1f%%\n", early, late, r.peak, secs / 40 * 100);
+        CHECK (! r.nan && r.peak <= 1.0f, "всё на максимуме: без NaN, пик <= 0 дБ");
+        CHECK (late < early * 1.2 + .01, "шиммер не разгоняется в бесконечный гул");
+        CHECK (secs / 40 * 100 < 20, "расход с залом, шиммером и призмой умеренный");
+
+        // PRISM двигает спектр: центр тяжести меняется во времени
+        Run q (sr); q.p.mode = 2; q.p.mix = 1; q.p.decay = .9f; q.p.prism = 1; q.p.drift = 1;
+        double cmin = 1e9, cmax = 0;
+        for (int k = 0; k < 8; ++k)
+        {
+            std::vector<float> cap; q.run (2.5, 1, &cap);
+            double lo = 0, hi = 0, lpS = 0;
+            for (float v : cap) { lpS += (v - lpS) * .06; lo += lpS * lpS; hi += (v - lpS) * (v - lpS); }
+            const double ratio = hi / std::max (1e-12, lo);
+            cmin = std::min (cmin, ratio); cmax = std::max (cmax, ratio);
+        }
+        std::printf ("  prism: доля верха меняется %.3f … %.3f\n", cmin, cmax);
+        CHECK (cmax > cmin * 1.3, "PRISM заметно двигает спектр во времени");
+    }
+
+    std::printf ("== TAIL: фильтр хвостов\n");
+    {
+        auto split = [&] (float lo, float hi, double& low, double& high)
+        {
+            Run r (sr); r.p.mode = 2; r.p.size = 2; r.p.mix = 1; r.p.decay = .8f; r.p.space = .5f; r.p.tailLo = lo; r.p.tailHi = hi;
+            std::vector<float> cap; r.run (6, 3); r.run (3, 3, &cap);
+            double lp = 0; low = high = 0;
+            for (float v : cap) { lp += (v - lp) * .25; low += lp * lp; high += (v - lp) * (v - lp); }   // граница ~2 кГц
+        };
+        double l0, h0, l1, h1, l2, h2;
+        split (20, 20000, l0, h0); split (20, 1200, l1, h1); split (1500, 20000, l2, h2);
+        std::printf ("  верх: открыто %.2f → срез 1.2k %.2f; низ: открыто %.2f → срез 1.5k %.2f\n", h0, h1, l0, l2);
+        CHECK (h1 < h0 * .4, "TAIL: правая точка убирает верх хвостов");
+        CHECK (l2 < l0 * .5, "TAIL: левая точка убирает низ хвостов");
+    }
+
+    std::printf ("== DEPTH: глубокий упругий саб\n");
+    {
+        auto band = [&] (const std::vector<float>& cap, double f)
+        { double re = 0, im = 0; for (size_t i = 0; i < cap.size(); ++i) { const double w = 2 * M_PI * f * (double) i / sr; re += cap[i] * std::cos (w); im += cap[i] * std::sin (w); } return std::sqrt (re * re + im * im) / (double) cap.size(); };
+        auto measure = [&] (float depth, double& e110, double& e55)
+        {
+            Run r (sr); r.p.mode = 2; r.p.size = 2; r.p.mix = 1; r.p.decay = .6f; r.p.depth = depth; r.p.layers = 0;
+            std::vector<float> cap; r.run (4, 1); r.run (3, 1, &cap);
+            e110 = band (cap, 110); e55 = band (cap, 55);
+        };
+        double a110, a55, b110, b55, c110, c55;
+        measure (0, a110, a55); measure (.4f, b110, b55); measure (1, c110, c55);
+        std::printf ("  110 Гц: %.4f → %.4f → %.4f; 55 Гц: %.4f → %.4f → %.4f (depth 0 / .4 / 1)\n", a110, b110, c110, a55, b55, c55);
+        CHECK (b110 > a110 * 3, "DEPTH: октава вниз (−12) появляется");
+        CHECK (c55 > b55 * 3 && c55 > a55 * 5, "DEPTH на максимуме: вторая октава вниз (−24) появляется");
+        // упругость: на щипках саб громче в момент ноты, чем между нотами
+        Run q (sr); q.p.mode = 3; q.p.size = 2; q.p.mix = 1; q.p.decay = .3f; q.p.depth = 1; q.p.space = 0;
+        std::vector<float> cap; q.run (4, 2); q.run (4, 2, &cap);
+        // огибающая саба (ниже 150 Гц) по 10 мс
+        double lp1 = 0, lp2 = 0; std::vector<double> env; double acc = 0; int n = 0;
+        for (float v : cap) { lp1 += (v - lp1) * .02; lp2 += (lp1 - lp2) * .02; acc += lp2 * lp2; if (++n == 480) { env.push_back (acc); acc = 0; n = 0; } }
+        std::vector<double> sorted = env; std::sort (sorted.begin(), sorted.end());
+        const double hiE = sorted[sorted.size() * 9 / 10], loE = sorted[sorted.size() / 5];
+        std::printf ("  саб на щипках: громко %.3g, между нотами %.3g\n", hiE, loE);
+        CHECK (hiE > loE * 2.5, "DEPTH: саб упругий — пружинит с нотами, а не стоит ровным гулом");
+        CHECK (! q.nan && q.peak <= 1.0f, "DEPTH на максимуме: без NaN и перегруза");
     }
 
     std::printf ("== decay = 0: память быстро гаснет\n");

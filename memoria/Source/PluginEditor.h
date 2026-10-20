@@ -134,6 +134,26 @@ private:
     MemoriaProcessor& proc;
 };
 
+// Фильтр хвостов: две точки на шкале частот + полосы PRISM
+class TailRange : public juce::Component, public juce::SettableTooltipClient, private juce::Timer
+{
+public:
+    explicit TailRange (MemoriaProcessor&);
+    ~TailRange() override { stopTimer(); }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
+private:
+    void timerCallback() override { repaint(); }
+    juce::Rectangle<float> bar() const;
+    MemoriaProcessor& proc;
+    juce::RangedAudioParameter *lo = nullptr, *hi = nullptr;
+    std::unique_ptr<juce::ParameterAttachment> attLo, attHi;
+    bool dragLo = true;
+};
+
 class MemoriaEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
@@ -147,6 +167,7 @@ private:
     mui::Look look;
     MemoryRing ring;
     LayerPanel layerPanel;
+    TailRange tailRange;
     Segments modeSeg, sizeSeg, harmSeg;
     juce::OwnedArray<Knob> knobs;
     juce::OwnedArray<Chip> chips;
