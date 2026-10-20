@@ -87,7 +87,9 @@ private:
     VisualComp visual;
     juce::ComboBox presets;
     juce::TextButton freezeBtn, randBtn, prevBtn, nextBtn;
-    juce::OwnedArray<juce::TextButton> tabs, chips;
+    juce::OwnedArray<juce::TextButton> tabs, chips, playBtns, saveBtns, editBtns;
+    juce::TextButton scnToggle;
+    juce::Rectangle<int> sceneRow, capSave, capEdit;
     juce::Rectangle<int> chipRow;
     juce::OwnedArray<KnobComp> knobs;
     juce::TooltipWindow tooltip { this, 600 };

@@ -44,6 +44,14 @@ public:
     pool::Engine& getEngine() { return engine; }
     float getFarEnv() const { return farEnvUi.load(); }
 
+    // сцены A–D
+    void saveScene (int k);               // записать текущие ручки в слот
+    void recallSceneToKnobs (int k);      // взять слот в ручки (сцены выключаются)
+    void playScene (int k);               // включить сцены и встать на слот
+    bool isScenesOn() const { return apvts.getRawParameterValue ("scnon")->load() > .5f; }
+    void setScenesOn (bool b);
+    float getScenePos() const { return scnUi.load(); }
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
@@ -60,6 +68,14 @@ private:
     std::array<std::atomic<float>, pool::P_COUNT> eff;
     std::atomic<float> farEnvUi { 1 };
     std::vector<float> inL, inR, outL2, outR2;
+
+    std::array<std::array<std::atomic<float>, pool::P_COUNT>, 4> sc;
+    std::array<std::atomic<float>, 4> scFrz;
+    int evoFrom = 0, evoTo = 1;
+    double evoT = 0;
+    bool evoRun = false;
+    std::atomic<float> scnUi { 0 };
+    void initScenes();
 
     static constexpr int kScope = 4096;
     float scope[kScope] {};

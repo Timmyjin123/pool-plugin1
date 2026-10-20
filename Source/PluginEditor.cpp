@@ -8,7 +8,7 @@ static juce::Font F (float h, bool bold = false) { return juce::Font (juce::Font
 
 static juce::Colour groupColour (int g)
 {
-    static const juce::uint32 c[kNumGroups] = { 0xffe8e8f0, 0xffc8ff3d, 0xff3de0ff, 0xffff3d8b, 0xffff7a3d, 0xff9d7aff, 0xffffb23d };
+    static const juce::uint32 c[kNumGroups] = { 0xffe8e8f0, 0xffc8ff3d, 0xff3de0ff, 0xffff3d8b, 0xffff7a3d, 0xff9d7aff, 0xffffb23d, 0xff7dffb0 };
     return juce::Colour (c[g % kNumGroups]);
 }
 
@@ -291,6 +291,25 @@ PoolEditor::PoolEditor (PoolProcessor& p) : AudioProcessorEditor (&p), proc (p),
             addAndMakeVisible (c);
         }
     }
+    scnToggle.setButtonText (U ("Сцены ВКЛ"));
+    scnToggle.getProperties().set ("col", (int) 0xff7dffb0);
+    scnToggle.onClick = [this] { proc.setScenesOn (! proc.isScenesOn()); };
+    addChildComponent (scnToggle);
+    for (int k = 0; k < 4; ++k)
+    {
+        const juce::String L = juce::String::charToString ((juce::juce_wchar) ('A' + k));
+        auto mk = [this, k] (juce::OwnedArray<juce::TextButton>& arr, const juce::String& t, std::function<void()> fn)
+        {
+            auto* b = arr.add (new juce::TextButton (t));
+            b->getProperties().set ("col", (int) 0xff7dffb0);
+            b->onClick = std::move (fn);
+            addChildComponent (b);
+            (void) k;
+        };
+        mk (playBtns, L, [this, k] { proc.playScene (k); });
+        mk (saveBtns, juce::String (juce::CharPointer_UTF8 ("\xe2\x86\x92")) + L, [this, k] { proc.saveScene (k); });
+        mk (editBtns, juce::String (juce::CharPointer_UTF8 ("\xe2\x86\x91")) + L, [this, k] { proc.recallSceneToKnobs (k); });
+    }
     for (int g = 0; g < kNumGroups; ++g)
     {
         auto* b = tabs.add (new juce::TextButton (U (groupNames()[g])));
@@ -315,6 +334,11 @@ void PoolEditor::showGroup (int g)
     group = g;
     for (int i = 0; i < tabs.size(); ++i) tabs[i]->setToggleState (i == g, juce::dontSendNotification);
     for (int i = 0; i < knobs.size(); ++i) knobs[i]->setVisible (paramSpecs()[i].group == g);
+    const bool sc = (g == 7);
+    scnToggle.setVisible (sc);
+    for (auto* b : playBtns) b->setVisible (sc);
+    for (auto* b : saveBtns) b->setVisible (sc);
+    for (auto* b : editBtns) b->setVisible (sc);
     resized();
 }
 
@@ -324,6 +348,13 @@ void PoolEditor::timerCallback()
     {
         const float ip = paramToValue (paramSpecs()[P_ipitch], proc.getBase (P_ipitch));
         for (auto* c : chips) c->setToggleState (std::fabs (c->getButtonText().getFloatValue() - ip) < .5f, juce::dontSendNotification);
+    }
+    if (group == 7)
+    {
+        scnToggle.setToggleState (proc.isScenesOn(), juce::dontSendNotification);
+        const int cur = (int) std::lround (proc.getScenePos());
+        for (int k = 0; k < playBtns.size(); ++k) playBtns[k]->setToggleState (proc.isScenesOn() && k == cur, juce::dontSendNotification);
+        repaint (sceneRow);
     }
     if (freezeBtn.getToggleState() != proc.isFrozen()) freezeBtn.setToggleState (proc.isFrozen(), juce::dontSendNotification);
     const int id = proc.getCurrentProgram() + 1;
@@ -338,6 +369,12 @@ void PoolEditor::paint (juce::Graphics& g)
     g.setColour (Palette::dim()); g.setFont (F (12.0f));
     g.drawText (U ("текстуры из любого звука"), 108, 20, 220, 20, juce::Justification::centredLeft);
 
+    if (! sceneRow.isEmpty())
+    {
+        g.setColour (Palette::dim()); g.setFont (F (12.5f));
+        g.drawText (U ("Записать:"), capSave, juce::Justification::centredRight);
+        g.drawText (U ("В ручки:"), capEdit, juce::Justification::centredRight);
+    }
     g.setColour (Palette::dim()); g.setFont (F (12.5f));
     g.drawText (U ("Высота входа"), chipRow.withWidth (108), juce::Justification::centredLeft);
     const auto lvl = juce::Rectangle<float> (20, 628, 1000, 4);
@@ -374,6 +411,21 @@ void PoolEditor::resized()
     const int tw = tb.getWidth() / juce::jmax (1, (int) tabs.size());
     for (auto* b : tabs) b->setBounds (tb.removeFromLeft (tw).reduced (2, 0));
     r.removeFromTop (8);
+    if (group == 7)
+    {
+        sceneRow = r.removeFromTop (34);
+        auto sr = sceneRow;
+        scnToggle.setBounds (sr.removeFromLeft (110).reduced (0, 2)); sr.removeFromLeft (14);
+        for (auto* b : playBtns) b->setBounds (sr.removeFromLeft (46).reduced (2, 2));
+        sr.removeFromLeft (20);
+        capSave = sr.removeFromLeft (78);
+        for (auto* b : saveBtns) b->setBounds (sr.removeFromLeft (50).reduced (2, 2));
+        sr.removeFromLeft (20);
+        capEdit = sr.removeFromLeft (78);
+        for (auto* b : editBtns) b->setBounds (sr.removeFromLeft (50).reduced (2, 2));
+        r.removeFromTop (6);
+    }
+    else sceneRow = {};
     auto kr = r.removeFromTop (150);
     int n = 0;
     for (auto* k : knobs) if (paramSpecs()[knobs.indexOf (k)].group == group) ++n;

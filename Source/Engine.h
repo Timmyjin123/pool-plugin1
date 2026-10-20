@@ -106,6 +106,13 @@ struct Biquad
         b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
     }
 
+    void setBandpass (double fs, double f, double q)
+    {
+        f = std::min (std::max (f, 20.0), fs * 0.45);
+        const double w0 = kTwoPi * f / fs, c = std::cos (w0), al = std::sin (w0) / (2.0 * q), a0 = 1.0 + al;
+        b0 = al / a0; b1 = 0; b2 = -al / a0; a1 = -2 * c / a0; a2 = (1 - al) / a0;
+    }
+
     inline float process (float x)
     {
         const double y = b0 * x + z1;
@@ -656,20 +663,55 @@ private:
     float g = .6f;
 };
 
-// Реверб на сети линий задержки (8 линий, матрица Хаусхолдера)
-class Reverb
+// Октава вверх (два плавающих отсчёта с окнами) — для шиммера внутри реверба
+class OctaveUp
 {
 public:
     void prepare (double sr)
     {
+        D = std::max (256, (int) (0.045 * sr));
+        size = nextPow2 (D * 2 + 8); mask = size - 1;
+        b.assign ((size_t) size, 0.0f);
+        wp = 0; ph = 0;
+    }
+    inline float process (float x)
+    {
+        b[(size_t) wp] = x;
+        float out = 0;
+        for (int k = 0; k < 2; ++k)
+        {
+            float p = ph + .5f * (float) k; if (p >= 1.0f) p -= 1.0f;
+            const float d = (float) D * (1.0f - p) + 2.0f;
+            float rp = (float) wp - d; if (rp < 0) rp += (float) size;
+            const int i0 = (int) rp; const float f = rp - (float) i0;
+            const float v = b[(size_t) (i0 & mask)] * (1 - f) + b[(size_t) ((i0 + 1) & mask)] * f;
+            const float w = std::sin ((float) kPi * p);
+            out += v * w * w;
+        }
+        wp = (wp + 1) & mask;
+        ph += 1.0f / (float) D; if (ph >= 1.0f) ph -= 1.0f;
+        return out;
+    }
+private:
+    std::vector<float> b;
+    int D = 2048, size = 8192, mask = 8191, wp = 0;
+    float ph = 0;
+};
+
+// Реверб на сети линий задержки (8 линий, матрица Хаусхолдера),
+// с регулируемым хвостом, насыщением в петле обратной связи и шиммером (+12) на входе
+class Reverb
+{
+public:
+    void prepare (double sampleRate)
+    {
+        sr = sampleRate;
         static const double base[8] = { 29.7, 37.1, 41.1, 43.7, 53.3, 59.9, 67.3, 79.1 };
-        const double t60 = 4.8;
         for (int i = 0; i < 8; ++i)
         {
             len[i] = (int) (base[i] * 0.001 * sr);
             line[i].assign ((size_t) nextPow2 (len[i] + 64), 0.0f);
             mask[i] = (int) line[i].size() - 1;
-            g[i] = (float) std::pow (10.0, -3.0 * len[i] / (t60 * sr));
             lp[i] = 0; ph[i] = (float) i * .7f; rate[i] = (float) (kTwoPi * (.25 + .07 * i) / sr);
         }
         wp = 0;
@@ -677,12 +719,27 @@ public:
         const double k = sr / 44100.0;
         apl[0].prepare ((int) (142 * k), .6f); apl[1].prepare ((int) (107 * k), .6f);
         apr[0].prepare ((int) (151 * k), .6f); apr[1].prepare ((int) (113 * k), .6f);
+        ou[0].prepare (sr); ou[1].prepare (sr);
+        shL = shR = 0;
+        curT60 = -1;
+        setParams (4.8, 0, 0);
+    }
+
+    void setParams (double t60, float sat, float shim)
+    {
+        t60 = std::max (.3, std::min (30.0, t60));
+        if (std::fabs (t60 - curT60) > 1e-3)
+        {
+            curT60 = t60;
+            for (int i = 0; i < 8; ++i) g[i] = (float) std::pow (10.0, -3.0 * len[i] / (t60 * sr));
+        }
+        useSat = sat > .001f; satK = 1.0f + 4.0f * sat; shimAmt = shim;
     }
 
     inline void process (float inL, float inR, float& outL, float& outR)
     {
-        const float xl = apl[1].process (apl[0].process (inL)) * .35f;
-        const float xr = apr[1].process (apr[0].process (inR)) * .35f;
+        const float xl = apl[1].process (apl[0].process (inL)) * .35f + shL * shimAmt * .5f;
+        const float xr = apr[1].process (apr[0].process (inR)) * .35f + shR * shimAmt * .5f;
         float y[8], sum = 0;
         for (int i = 0; i < 8; ++i)
         {
@@ -694,7 +751,9 @@ public:
             const int i0 = (int) rp; const float f = rp - (float) i0;
             const float v = line[i][(size_t) (i0 & mask[i])] * (1 - f) + line[i][(size_t) ((i0 + 1) & mask[i])] * f;
             lp[i] = v * (1 - damp) + lp[i] * damp;
-            y[i] = lp[i] * g[i];
+            float yy = lp[i] * g[i];
+            if (useSat) yy = std::tanh (yy * satK) / satK;
+            y[i] = yy;
             sum += y[i];
         }
         const float h = sum * .25f;
@@ -706,15 +765,80 @@ public:
         }
         ++wp;
         outL = oL * .5f; outR = oR * .5f;
+        if (shimAmt > .001f)
+        {
+            shL = std::tanh (ou[0].process (outL) * 1.5f);
+            shR = std::tanh (ou[1].process (outR) * 1.5f);
+        }
+        else shL = shR = 0;
     }
 
 private:
     std::vector<float> line[8];
     int len[8] {}, mask[8] {};
     float g[8] {}, lp[8] {}, ph[8] {}, rate[8] {};
-    float damp = .5f;
+    float damp = .5f, satK = 1, shimAmt = 0, shL = 0, shR = 0;
+    bool useSat = false;
+    double sr = 48000, curT60 = -1;
     int wp = 0;
     Allpass apl[2], apr[2];
+    OctaveUp ou[2];
+};
+
+// Шумовое облако: цветной шум + шумовой вокодер (шум несёт спектр и громкость исходного звука)
+class NoiseCloud
+{
+public:
+    static constexpr int NB = 16;
+    void prepare (double sampleRate)
+    {
+        sr = sampleRate;
+        for (int k = 0; k < NB; ++k)
+        {
+            const double f = 110.0 * std::pow (11000.0 / 110.0, (k + .5) / NB);
+            ana[k].setBandpass (sr, f, 3.0); carL[k].setBandpass (sr, f, 3.0); carR[k].setBandpass (sr, f, 3.0);
+            ana[k].reset(); carL[k].reset(); carR[k].reset(); env[k] = 0;
+        }
+        atk = (float) (1.0 - std::exp (-1.0 / (0.004 * sr)));
+        rel = (float) (1.0 - std::exp (-1.0 / (0.060 * sr)));
+        eAtk = (float) (1.0 - std::exp (-1.0 / (0.010 * sr)));
+        eRel = (float) (1.0 - std::exp (-1.0 / (0.150 * sr)));
+        lpL = lpR = 0; gEnv = 0; rng = Rng (0x5EED1234u);
+    }
+
+    inline void process (float src, float& oL, float& oR, float voc, float col, float fol)
+    {
+        const float nL = rng.bi(), nR = rng.bi();
+        // цвет: от тёмного (300 Гц) до белого (12 кГц)
+        const float fc = 300.0f * std::pow (40.0f, col);
+        const float a = 1.0f - std::exp (-(float) kTwoPi * fc / (float) sr);
+        lpL += (nL - lpL) * a; lpR += (nR - lpR) * a;
+        const float comp = 1.0f / std::sqrt (std::max (.02f, a)) * .35f;   // выравнивает громкость при разном цвете
+        const float x = std::fabs (src);
+        gEnv += (x - gEnv) * (x > gEnv ? eAtk : eRel);
+        const float amp = (1.0f - fol) + fol * std::min (1.0f, gEnv * 5.0f);
+        float pl = lpL * comp * amp, pr = lpR * comp * amp;
+        float vl = 0, vr = 0;
+        if (voc > .001f)
+        {
+            for (int k = 0; k < NB; ++k)
+            {
+                const float e = std::fabs (ana[k].process (src));
+                env[k] += (e - env[k]) * (e > env[k] ? atk : rel);
+                vl += carL[k].process (nL) * env[k]; vr += carR[k].process (nR) * env[k];
+            }
+            vl *= 18.0f; vr *= 18.0f;
+        }
+        oL = pl * (1.0f - voc) + vl * voc;
+        oR = pr * (1.0f - voc) + vr * voc;
+    }
+
+private:
+    double sr = 48000;
+    Biquad ana[NB], carL[NB], carR[NB];
+    float env[NB] {};
+    float atk = .01f, rel = .001f, eAtk = .01f, eRel = .001f, lpL = 0, lpR = 0, gEnv = 0;
+    Rng rng;
 };
 
 class Compressor
@@ -767,6 +891,8 @@ struct EngineParams
     float size = 300, dens = 20, pos = .5f, pj = .3f, pitch = 0, ps = 0, harm = 0, rev = 0, wid = .8f, glitch = 0, crush = 0;
     bool freeze = false;
     float ppos = .5f, ppj = .3f;   // позиция/разброс для пэда и далёкого голоса (стабильные)
+    float fbk = 0, rdec = 4.8f, rsat = 0, rshim = 0;
+    float nz = 0, nvoc = .7f, ncol = .7f, nfol = .6f;
     int pnote = 0, gsnap = 0;
     float pstrict = .6f;
     float pad = .55f, pdr = .35f, pwid = .9f, ppitch = 0, pdark = 4500, pwarm = .25f;
@@ -798,6 +924,9 @@ public:
             dly[c].prepare ((int) (sr * 2.2));
         }
         rev.prepare (sr);
+        noise.prepare (sr); gNz = 0;
+        selfHp.set (sr, 40.0, .7071, true); selfLp.set (sr, 7000.0, .7071, false); selfHp.reset(); selfLp.reset();
+        std::fill (std::begin (fbOut), std::end (fbOut), 0.0f);
         comp.prepare (sr);
         const float c = (float) (1.0 - std::exp (-1.0 / (0.03 * sr)));
         smCoef = c;
@@ -851,7 +980,15 @@ private:
         GrainParams gp;
         gp.size = P.size; gp.dens = P.dens; gp.pos = P.pos; gp.pj = P.pj; gp.pitch = P.pitch; gp.ps = P.ps; gp.harm = P.harm;
         gp.rev = P.rev; gp.wid = P.wid; gp.glitch = P.glitch; gp.crush = P.crush; gp.freeze = P.freeze; gp.snap = P.gsnap;
-        grains.process (xi, gL, gR, m, gp);
+        float gin[kChunk];
+        for (int i = 0; i < m; ++i)
+        {
+            float fb = 0;
+            if (P.fbk > .001f) fb = std::tanh (selfLp.process (selfHp.process (fbOut[i])) * P.fbk * 1.5f) * .8f;
+            gin[i] = xi[i] + fb;
+        }
+        grains.process (gin, gL, gR, m, gp);
+        rev.setParams (P.rdec, P.rsat, P.rshim);
 
         SpecParams sp;
         sp.pos = P.ppos; sp.pj = P.ppj; sp.note = P.pnote; sp.strict = P.pstrict; sp.pdr = P.pdr; sp.pwid = P.pwid; sp.ppitch = P.ppitch; sp.freg = P.freg; sp.fcl = P.fcl;
@@ -905,7 +1042,14 @@ private:
             const float fg = sm (gFar, tFar);
             const float fl = farLp[0].process (fL[i] * fg), fr = farLp[1].process (fR[i] * fg);
 
-            const float inDL = al + fl, inDR = ar + fr;
+            float nzl = 0, nzr = 0;
+            const float nzg = sm (gNz, P.nz * P.nz * 2.0f);
+            if (nzg > .0005f || gNz > .0005f)
+            {
+                noise.process (.5f * (al + ar), nzl, nzr, P.nvoc, P.ncol, P.nfol);
+                nzl *= nzg; nzr *= nzg;
+            }
+            const float inDL = al + fl + nzl, inDR = ar + fr + nzr;
             // стерео-дилей с перекрёстной обратной связью
             dtS += (tDtS - dtS) * smCoef;
             const float dmv = sm (gDm, tDm);
@@ -927,6 +1071,7 @@ private:
             comp.process (ol, orr);
             ol = softLimit (ol); orr = softLimit (orr);
             outL[i] = ol; outR[i] = orr;
+            fbOut[i] = .5f * (ol + orr);
 
             sqG += gL[i] * gL[i] + gR[i] * gR[i];
             sqP += ql * ql + qr * qr;
@@ -946,6 +1091,10 @@ private:
     Biquad hpF[2], lpF[2], padLp[2], farLp[2], fbLp[2];
     DelayLine dly[2];
     Reverb rev;
+    NoiseCloud noise;
+    float gNz = 0;
+    Biquad selfHp, selfLp;
+    float fbOut[kChunk] {};
     Compressor comp;
     float smCoef = .001f;
     float gDry = 0, gWet = 0, gDrive = 1, gPost = .4f, gPadG = 0, gPadD = 1, gPadC = .33f, gFar = 0, gDm = 0, gRvm = 0, gMaster = 0, gFs = 0;

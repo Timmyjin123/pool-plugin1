@@ -121,5 +121,59 @@ int main()
         std::printf ("  off-harmonic partial: strict0=%.5f strict1=%.5f\n", e0, e1);
         CHECK (e1 < e0 * .25, "строгость убирает негармоничные тона");
     }
+
+    // шумовой вокодер: шум повторяет спектр (много энергии у 220 Гц, мало у 3 кГц) и не раздувается
+    {
+        Engine e6; e6.prepare (sr); e6.setOffline (true);
+        EngineParams Q; Q.dw = 0; Q.dens = 0.05f; Q.drive = 1; Q.rvm = 0; Q.dm = 0; Q.pad = 0; Q.farLevel = 0; Q.nz = .5f; Q.nvoc = 1; Q.nfol = 1; Q.vol = .8f; Q.hp = 20; Q.lp = 18000;
+        std::vector<float> out; double p6 = 0;
+        for (int b = 0; b < (int) (sr * 4 / block); ++b)
+        {
+            for (int i = 0; i < block; ++i) { in[(size_t) i] = (float) (.3 * std::sin (p6)); p6 += kTwoPi * 220.0 / sr; }
+            e6.process (in.data(), nullptr, l.data(), r.data(), block, Q);
+            if (b > 40) out.insert (out.end(), l.begin(), l.end());
+        }
+        double rms = 0; for (float v : out) rms += v * v; rms = std::sqrt (rms / (double) out.size());
+        auto band = [&] (double f0, double f1) { double s = 0; int n = 0; for (double f = f0; f <= f1; f += (f1 - f0) / 12) { const double a = goertzel (out, f, sr); s += a * a; ++n; } return s / n; };
+        const double lo = band (180, 270), hi = band (2600, 3400);
+        std::printf ("  noise vocoder: rms=%.4f  band220=%.3e band3k=%.3e\n", rms, lo, hi);
+        CHECK (rms > .01 && rms < .8, "шум имеет разумную громкость");
+        CHECK (lo > 10 * hi, "шумовой вокодер повторяет спектр источника");
+    }
+
+    // самоперезапись + реверб с насыщением и шиммером: устойчивость, нет NaN, звук ограничен
+    {
+        Engine e7; e7.prepare (sr);
+        EngineParams Q; Q.dw = 1; Q.fbk = 1; Q.rvm = 1; Q.rdec = 24; Q.rsat = 1; Q.rshim = 1; Q.drive = 8; Q.dens = 60; Q.pad = 1; Q.farLevel = 1; Q.vol = 1; Q.nz = 1;
+        bool bad = false; float pk = 0; double p7 = 0;
+        for (int b = 0; b < (int) (sr * 20 / block); ++b)
+        {
+            for (int i = 0; i < block; ++i) { in[(size_t) i] = (b < 200 ? (float) (.5 * std::sin (p7)) : 0.0f); p7 += kTwoPi * 220.0 / sr; }
+            e7.process (in.data(), nullptr, l.data(), r.data(), block, Q);
+            for (int i = 0; i < block; ++i) { if (! std::isfinite (l[(size_t) i]) || ! std::isfinite (r[(size_t) i])) bad = true; pk = std::max (pk, std::max (std::fabs (l[(size_t) i]), std::fabs (r[(size_t) i]))); }
+        }
+        std::printf ("  extreme feedback: peak=%.3f\n", pk);
+        CHECK (! bad && pk <= 1.01f, "экстремальная обратная связь устойчива и ограничена");
+    }
+
+    // шиммер: в хвосте реверба появляется октава вверх
+    {
+        double eOn = 0, eOff = 0;
+        for (int m = 0; m < 2; ++m)
+        {
+            Engine e8; e8.prepare (sr); e8.setOffline (true);
+            EngineParams Q; Q.dw = 0; Q.dens = 0.05f; Q.drive = 1; Q.dm = 0; Q.pad = 0; Q.farLevel = 0; Q.rvm = 1; Q.rdec = 12; Q.rshim = m ? 1.0f : 0.0f; Q.vol = 1; Q.hp = 20; Q.lp = 18000;
+            std::vector<float> out; double p8 = 0;
+            for (int b = 0; b < (int) (sr * 6 / block); ++b)
+            {
+                for (int i = 0; i < block; ++i) { in[(size_t) i] = (b < 40 ? (float) (.5 * std::sin (p8)) : 0.0f); p8 += kTwoPi * 220.0 / sr; }
+                e8.process (in.data(), nullptr, l.data(), r.data(), block, Q);
+                if (b > 90) out.insert (out.end(), l.begin(), l.end());
+            }
+            (m ? eOn : eOff) = goertzel (out, 440, sr);
+        }
+        std::printf ("  shimmer @440: off=%.6f on=%.6f\n", eOff, eOn);
+        CHECK (eOn > 3 * eOff, "шиммер добавляет октаву вверх в хвост");
+    }
     return fails ? 1 : 0;
 }
