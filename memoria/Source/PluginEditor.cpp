@@ -200,6 +200,8 @@ void Chip::paint (juce::Graphics& g)
 // ============================================================ MemoryRing
 MemoryRing::MemoryRing (MemoriaProcessor& p) : proc (p)
 {
+    corePar = proc.apvts.getParameter ("core");
+    coreAtt = std::make_unique<juce::ParameterAttachment> (*corePar, [] (float) {}, nullptr);
     startTimerHz (30);
 }
 
@@ -261,7 +263,10 @@ void MemoryRing::paint (juce::Graphics& g)
 {
     auto& v = proc.getEngine().viz;
     const int mode = v.mode.load();
-    const auto acc = Pal::mode (mode);
+    const float coreV = v.core.load();
+    // CORE: насыщенность и яркость цвета кольца
+    const auto accBase = Pal::mode (mode);
+    const auto acc = accBase.withSaturation (accBase.getSaturation() * (.3f + .7f * coreV)).withBrightness (juce::jmin (1.0f, accBase.getBrightness() * (.72f + .4f * coreV)));
     const float W = (float) getWidth(), H = (float) getHeight();
     const float cx = W * .45f, cy = H * .5f;
     const float R = juce::jmin (H * .3f, 88.0f);
@@ -439,14 +444,35 @@ void MemoryRing::paint (juce::Graphics& g)
     g.setColour (acc.withAlpha (.7f));
     g.drawEllipse (juce::Rectangle<float> (core * 2, core * 2).withCentre ({ cx, cy }), 1.2f);
 
+    // мембрана организма: дышит вместе со звуком
+    if (v.organism.load() > 0)
+    {
+        const float br = v.breath.load();
+        const float rr = core * (1.55f + .25f * (1 - br));
+        g.setColour (acc.withAlpha (.12f + .18f * (1 - br)));
+        g.drawEllipse (juce::Rectangle<float> (rr * 2, rr * 2).withCentre ({ cx, cy }), 1.0f + 2.0f * (1 - br));
+    }
+    // CORE: заливка ядра по силе
+    g.setColour (acc.withAlpha (.08f + .3f * coreV));
+    g.fillEllipse (juce::Rectangle<float> (core * 2 * (.4f + .6f * coreV), core * 2 * (.4f + .6f * coreV)).withCentre ({ cx, cy }));
     g.setColour (Pal::text());
     g.setFont (F (13, true, .16f));
+    if (coreHover || coreDrag)
+    {
+        static const char* what[4] = { "RANDOM", "DENSITY", "SCATTER", "WOW" };
+        g.drawText ("CORE " + juce::String (juce::roundToInt (coreV * 100)) + "%", juce::Rectangle<float> (140, 18).withCentre ({ cx, cy - 6 }), juce::Justification::centred);
+        g.setColour (Pal::dim()); g.setFont (F (10, false, .08f));
+        g.drawText (what[juce::jlimit (0, 3, mode)], juce::Rectangle<float> (140, 14).withCentre ({ cx, cy + 11 }), juce::Justification::centred);
+    }
+    else
     g.drawText (mem::modeName (mode), juce::Rectangle<float> (140, 18).withCentre ({ cx, cy - 6 }), juce::Justification::centred);
     static const char* sizes[3] = { "LONG", "MID", "SHORT" };
+    if (! (coreHover || coreDrag)) {
     g.setColour (Pal::dim());
     g.setFont (F (10, false, .08f));
     g.drawText (juce::String (sizes[juce::jlimit (0, 2, v.size.load())]) + "  " + juce::String ((double) total / proc.getSampleRate(), 1) + " s",
                 juce::Rectangle<float> (140, 14).withCentre ({ cx, cy + 11 }), juce::Justification::centred);
+    }
 
     // статус
     auto badge = [&] (const juce::String& s, juce::Colour c, float y)
@@ -498,14 +524,16 @@ MemoriaEditor::MemoriaEditor (MemoriaProcessor& p)
     : AudioProcessorEditor (p), proc (p), ring (p), layerPanel (p), tailRange (p),
       modeSeg (p, "mode", { "GRAINS", "DIFFUSE", "NETWORK", "TAPES" }, true),
       sizeSeg (p, "size", { "LONG", "MID", "SHORT" }, false),
-      harmSeg (p, "harmony", { "OCT", "5TH", "FREE" }, false)
+      harmStep (p, "harmony", "HARMONY"), orgStep (p, "organism", "ORGANISM")
 {
     setLookAndFeel (&look);
     addAndMakeVisible (ring);
     addAndMakeVisible (modeSeg);
     addAndMakeVisible (sizeSeg);
-    addAndMakeVisible (harmSeg);
-    harmSeg.setTooltip (U ("Гармония слоёв. OCT — только октавы, всегда в тональности. 5TH — плюс квинта, одна нота лада может уйти. FREE — любые интервалы, включая кварты."));
+    addAndMakeVisible (harmStep);
+    addAndMakeVisible (orgStep);
+    harmStep.setTooltip (U ("Гармония сдвигов слоёв, гранул и шиммера. OCT — только октавы, всегда в тональности. 5TH — квинта, SUS — секунда и кварта, 7TH — септима, 9TH — нона: окраска интервалом, отдельные ноты могут выйти из лада. FREE — всё сразу."));
+    orgStep.setTooltip (U ("Организм — живая кожа звука: Mid/Side, тёплые аналоговые фильтры, дыхание (играешь — открыто, хвост — темнее и шире), частоты уступают новым нотам, хвосты нарастают. TAPE — тёплый низ, CONSOLE — плотная середина, GLASS — воздух и ширина, ASH — тёмный и густой."));
     modeSeg.setTooltip (U ("Режим: гранулы над петлёй · кольцо дрейфующих allpass · сеть из 4 линий · две ленты неравной длины"));
     sizeSeg.setTooltip (U ("Размер памяти: длинные, средние или короткие петли"));
 
@@ -568,7 +596,7 @@ void MemoriaEditor::timerCallback()
         const auto c = Pal::mode (m);
         for (auto* k : knobs) k->setAccent (c);
         sizeSeg.setAccent (c);
-        harmSeg.setAccent (c);
+        harmStep.setAccent (c); orgStep.setAccent (c);
         for (int i : { 0, 1, 2, 4 }) chips[i]->setAccent (c);
         repaint();
     }
@@ -608,7 +636,8 @@ void MemoriaEditor::resized()
     ring.setBounds (0, 100, W, 300);
 
     layerPanel.setBounds (W - 268, 156, 214, 4 * 48);
-    harmSeg.setBounds (W - 268, 116, 214, 30);
+    harmStep.setBounds (W - 268, 116, 104, 30);
+    orgStep.setBounds (W - 158, 116, 104, 30);
     const int nb = 10, kw = 92, kx = (W - kw * nb) / 2;
     for (int i = 0; i < nb; ++i) knobs[i]->setBounds (kx + i * kw, 416, kw, 100);
     // слева от кольца: TONE · DEPTH / CHAOS · RUIN
@@ -651,8 +680,9 @@ void LayerPanel::paint (juce::Graphics& g)
         g.drawText ("LAYER " + juce::String (j + 1), r.withTrimmedLeft (26).withHeight (26), juce::Justification::centredLeft);
         g.setColour (Pal::dim());
         g.setFont (F (10.5f, false, .1f));
-        g.drawText (juce::String (mem::bandName (band)) + U (" · ") + mem::texName (tex), r.withTrimmedLeft (26).withTrimmedTop (20).withHeight (16),
-                    juce::Justification::centredLeft);
+        const float sw = v.lSwell[(size_t) j].load();
+        g.drawText (juce::String (mem::bandName (band)) + U (" · ") + mem::texName (tex) + (sw > .05f ? U (" · SWELL ") + juce::String (sw, 1) + "s" : juce::String()),
+                    r.withTrimmedLeft (26).withTrimmedTop (20).withHeight (16), juce::Justification::centredLeft);
         g.setColour (col.withAlpha (act));
         g.setFont (F (17, true));
         const juce::String st = semis == 0 ? U ("±0") : (semis > 0 ? "+" + juce::String (semis) : U ("−") + juce::String (-semis));
@@ -746,3 +776,51 @@ void TailRange::paint (juce::Graphics& g)
     }
     g.setColour (Pal::line()); g.drawRoundedRectangle (b, 6, 1);
 }
+
+// ============================================================ Stepper
+Stepper::Stepper (MemoriaProcessor& p, const char* id, const juce::String& cap) : caption (cap)
+{
+    auto* par = p.apvts.getParameter (id);
+    if (auto* ch = dynamic_cast<juce::AudioParameterChoice*> (par)) names = ch->choices;
+    att = std::make_unique<juce::ParameterAttachment> (*par, [this] (float v) { cur = juce::roundToInt (v); repaint(); }, nullptr);
+    att->sendInitialUpdate();
+}
+void Stepper::step (int d) { if (names.isEmpty()) return; att->setValueAsCompleteGesture ((float) ((cur + d + names.size()) % names.size())); }
+void Stepper::mouseUp (const juce::MouseEvent& e) { if (getLocalBounds().contains (e.getPosition())) step (e.x < getWidth() / 3 ? -1 : 1); }
+void Stepper::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w) { step (w.deltaY > 0 ? 1 : -1); }
+void Stepper::paint (juce::Graphics& g)
+{
+    const auto r = getLocalBounds().toFloat().reduced (.5f);
+    g.setColour (Pal::panel().brighter (hover ? .06f : 0)); g.fillRoundedRectangle (r, r.getHeight() * .5f);
+    g.setColour (accent.withAlpha (.55f)); g.drawRoundedRectangle (r, r.getHeight() * .5f, 1.1f);
+    g.setColour (Pal::dim()); g.setFont (F (8.5f, true, .14f));
+    g.drawText (caption, r.withTrimmedTop (3).withHeight (10), juce::Justification::centred);
+    g.setColour (accent); g.setFont (F (12.5f, true, .14f));
+    g.drawText (names[cur], r.withTrimmedTop (10), juce::Justification::centred);
+    g.setColour (Pal::dim().brighter (hover ? .4f : 0)); g.setFont (F (11, true));
+    g.drawText (U ("◂"), r.withWidth (18).translated (4, 4), juce::Justification::centred);
+    g.drawText (U ("▸"), r.withTrimmedLeft (r.getWidth() - 22).translated (0, 4), juce::Justification::centred);
+}
+
+// ============================================================ MemoryRing: CORE
+bool MemoryRing::overCore (juce::Point<float> p) const
+{
+    const float cx = (float) getWidth() * .45f, cy = (float) getHeight() * .5f;
+    return p.getDistanceFrom ({ cx, cy }) < 62.0f;
+}
+void MemoryRing::mouseMove (const juce::MouseEvent& e) { const bool h = overCore (e.position); if (h != coreHover) { coreHover = h; setMouseCursor (h ? juce::MouseCursor::UpDownResizeCursor : juce::MouseCursor::NormalCursor); } }
+void MemoryRing::mouseDown (const juce::MouseEvent& e)
+{
+    coreDrag = overCore (e.position);
+    if (! coreDrag) return;
+    dragStartVal = corePar->getValue(); dragStartY = e.position.y;
+    coreAtt->beginGesture();
+}
+void MemoryRing::mouseDrag (const juce::MouseEvent& e)
+{
+    if (! coreDrag) return;
+    const float v = juce::jlimit (0.0f, 1.0f, dragStartVal + (dragStartY - e.position.y) / 180.0f);
+    coreAtt->setValueAsPartOfGesture (v);
+}
+void MemoryRing::mouseUp (const juce::MouseEvent&) { if (coreDrag) coreAtt->endGesture(); coreDrag = false; }
+void MemoryRing::mouseDoubleClick (const juce::MouseEvent& e) { if (overCore (e.position)) coreAtt->setValueAsCompleteGesture (.5f); }

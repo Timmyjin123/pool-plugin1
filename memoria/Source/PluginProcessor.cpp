@@ -60,8 +60,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout MemoriaProcessor::makeLayout
         ps.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "tailLo", 1 }, U ("Хвосты: срез низа"), lo, 40, hz));
         ps.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "tailHi", 1 }, U ("Хвосты: срез верха"), hi, 16000, hz));
     }
-    ps.push_back (std::make_unique<AudioParameterChoice> (ParameterID { "harmony", 1 }, U ("Гармония слоёв: октавы / квинты / свободно"),
-                                                          StringArray { "OCT", "5TH", "FREE" }, 0));
+    f01 ("core", "Ядро: сила характера режима", .5f);
+    ps.push_back (std::make_unique<AudioParameterChoice> (ParameterID { "organism", 1 }, U ("Организм: кожа звука"),
+                                                          StringArray { "OFF", "TAPE", "CONSOLE", "GLASS", "ASH" }, 1));
+    ps.push_back (std::make_unique<AudioParameterChoice> (ParameterID { "harmony", 1 }, U ("Гармония слоёв"),
+                                                          StringArray { "OCT", "5TH", "SUS", "7TH", "9TH", "FREE" }, 0));
     return { ps.begin(), ps.end() };
 }
 
@@ -120,6 +123,8 @@ void MemoriaProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBu
     p.chaos = val ("chaos");
     p.ruin = val ("ruin");
     p.harmony = (int) val ("harmony");
+    p.core = varied (9, val ("core"));
+    p.organism = (int) val ("organism");
     p.space = varied (4, val ("space"));
     p.shimmer = val ("shimmer") > .5f ? .6f : 0.0f;
     p.tailLo = val ("tailLo");
@@ -136,7 +141,7 @@ void MemoriaProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBu
 // ---------------------------------------------------------------- VARY
 const char* MemoriaProcessor::varyId (int i)
 {
-    static const char* ids[kVary] = { "spread", "drift", "layers", "pingpong", "space", "tone", "warmth", "dynamics", "depth" };
+    static const char* ids[kVary] = { "spread", "drift", "layers", "pingpong", "space", "tone", "warmth", "dynamics", "depth", "core" };
     return ids[juce::jlimit (0, kVary - 1, i)];
 }
 
@@ -144,7 +149,7 @@ const char* MemoriaProcessor::varyId (int i)
 // остальные плавно возвращаются к своим значениям. Режим, размер, DECAY, MIX, OUTPUT не трогаются.
 void MemoriaProcessor::updateVary (int n)
 {
-    static const float range[kVary] = { .20f, .25f, .25f, .20f, .15f, .08f, .12f, .12f, .10f };
+    static const float range[kVary] = { .20f, .25f, .25f, .20f, .15f, .08f, .12f, .12f, .10f, .18f };
     const bool on = val ("vary") > .5f;
     const double dt = (double) n / sr;
     if (on)
@@ -198,6 +203,7 @@ void MemoriaProcessor::setCurrentProgram (int i)
     set ("layers", pr.layers); set ("layerSeed", (float) pr.seed); set ("pingpong", pr.pingpong); set ("blur", pr.blur ? 1.0f : 0.0f);
     set ("tone", pr.tone); set ("depth", pr.depth); set ("reverse", pr.reverse ? 1.0f : 0.0f);
     set ("chaos", pr.chaos); set ("ruin", pr.ruin); set ("harmony", (float) pr.harmony);
+    set ("core", pr.core); set ("organism", (float) pr.organism);
     set ("space", pr.space); set ("shimmer", pr.shimmer ? 1.0f : 0.0f); set ("tailLo", pr.tailLo); set ("tailHi", pr.tailHi);
 }
 

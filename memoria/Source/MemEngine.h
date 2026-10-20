@@ -59,7 +59,9 @@ struct Params
     float depth = .4f;     // саб-слой на октаву ниже + подъём низа
     float chaos = 0;       // случайные события: warp, stutter, reverse, tape stop, dropout, shuffle
     float ruin = 0;        // шумы и разрушение памяти: шипение, треск, эрозия, понижение разрядности
-    int harmony = 0;       // сдвиги слоёв: 0 только октавы (всегда в тональности), 1 + квинты, 2 свободно
+    int harmony = 0;       // сдвиги слоёв: 0 OCT (всегда в тональности), 1 5TH, 2 SUS, 3 7TH, 4 9TH, 5 FREE
+    float core = .5f;      // CORE: сила «подписи» режима (центр кольца)
+    int organism = 1;      // ORGANISM: 0 OFF, 1 TAPE, 2 CONSOLE, 3 GLASS, 4 ASH
     float space = 0;       // большой реверберационный зал: громкость и длина хвоста (1.5 … 30 с)
     float shimmer = 0;     // хвост реверба поднимается на октаву (по HARMONY) и каскадом уходит вверх
     float prism = -1;      // переливы спектра; −1 — берётся из DRIFT (так в плагине)
@@ -70,7 +72,7 @@ struct Params
 
 inline const char* chaosName (int t)
 {
-    static const char* n[7] = { "", "WARP", "STUTTER", "REVERSE", "TAPE STOP", "DROPOUT", "SHUFFLE" };
+    static const char* n[7] = { "", "WARP", "STUTTER", "REVERSE", "WOW", "DROPOUT", "SHUFFLE" };
     return n[std::clamp (t, 0, 6)];
 }
 
@@ -122,7 +124,8 @@ struct ChaosStage
             case 2: stLen = (float) ((.08 + .32 * rng.uni()) * sr); dur = (long) ((.5 + 2.0 * rng.uni()) * sr);
                     start = now - stLen; pos = 0; break;
             case 3: dur = (long) ((.4 + .5 * rng.uni()) * sr); start = now; break;
-            case 4: dur = (long) ((.4 + .8 * rng.uni()) * sr); start = now; pos = 0; break;
+            case 4: dur = (long) ((2.0 + 3.0 * rng.uni()) * sr); warpDepth = (float) ((.0008 + .0017 * rng.uni()) * sr);
+                    warpRate = (float) (2 * 3.14159265358979 * (.5 + .6 * rng.uni()) / sr); warpPh = 0; break;   // плавающий строй
             case 5: dur = (long) ((.05 + .35 * rng.uni()) * sr); dropDepth = .05f + .35f * rng.uni(); break;
             default: dur = (long) (.3 * sr); seedOffset = 1 + (int) (rng.next() % 997u); break;
         }
@@ -159,7 +162,13 @@ struct ChaosStage
                     break;
                 }
                 case 3: idx = start - (double) t; break;
-                case 4: { const double sp = std::max (0.0, 1.0 - (double) t / (double) dur); pos += sp; idx = start + pos; break; }
+                case 4:
+                {
+                    warpPh += warpRate;
+                    const double fl = .15 * std::sin (warpPh * 11.3);   // лёгкое дрожание поверх качания
+                    idx = (double) w - nd - warpDepth * (1.0 + std::sin (warpPh) + fl);
+                    break;
+                }
                 case 5: dropG += ((on ? dropDepth : 1.0f) - dropG) * dropRate; gain = dropG; break;
                 default: break;
             }
@@ -179,11 +188,33 @@ struct ChaosStage
 struct LayerChar { int band = 1; int semis = 0; int tex = 0; };
 inline const char* bandName (int b) { static const char* n[4] = { "DARK", "MID", "BRIGHT", "AIR" }; return n[std::clamp (b, 0, 3)]; }
 inline const char* texName (int t) { static const char* n[4] = { "CLEAN", "TAPE", "FOLD", "CRUSH" }; return n[std::clamp (t, 0, 3)]; }
-inline LayerChar layerChar (int seed, int k, int harmony = 2)
+inline const char* harmonyName (int h) { static const char* n[6] = { "OCT", "5TH", "SUS", "7TH", "9TH", "FREE" }; return n[std::clamp (h, 0, 5)]; }
+
+// Интервалы для гранул и шиммера по выбранной гармонии (отношения частот)
+inline int harmonyRatios (int h, float* out)
 {
-    harmony = std::clamp (harmony, 0, 2);
-    static const LayerChar def[3][4] = { { { 0, -12, 1 }, { 1, 0, 0 }, { 2, 12, 0 }, { 3, 24, 1 } },
+    static const float R[6][6] = { { .5f, 2.0f }, { .5f, 2.0f, 1.4983071f, .7491535f }, { .5f, 2.0f, 1.3348399f, 1.1224620f },
+                                   { .5f, 2.0f, 1.7817974f, .8908987f }, { .5f, 2.0f, 1.1224620f, 2.2449241f },
+                                   { .5f, 2.0f, 1.3348399f, 1.4983071f, .7491535f, 1.1892071f } };
+    static const int N[6] = { 2, 4, 4, 4, 4, 6 };
+    h = std::clamp (h, 0, 5);
+    for (int i = 0; i < N[h]; ++i) out[i] = R[h][i];
+    return N[h];
+}
+inline float shimmerRatio (int h)
+{
+    static const float r[6] = { 2.0f, 1.4983071f, 1.4983071f, 1.7817974f, 2.2449241f, 1.4983071f };
+    return r[std::clamp (h, 0, 5)];
+}
+
+inline LayerChar layerChar (int seed, int k, int harmony = 5)
+{
+    harmony = std::clamp (harmony, 0, 5);
+    static const LayerChar def[6][4] = { { { 0, -12, 1 }, { 1, 0, 0 }, { 2, 12, 0 }, { 3, 24, 1 } },
                                          { { 0, -12, 1 }, { 1, 0, 0 }, { 2, 12, 0 }, { 3, 19, 1 } },
+                                         { { 0, -12, 1 }, { 1, 5, 0 }, { 2, 14, 0 }, { 3, 19, 1 } },
+                                         { { 0, -12, 1 }, { 1, 10, 0 }, { 2, 12, 0 }, { 3, 19, 1 } },
+                                         { { 0, -12, 1 }, { 1, 2, 0 }, { 2, 14, 0 }, { 3, 19, 1 } },
                                          { { 0, -12, 1 }, { 1, 0, 0 }, { 2, 12, 0 }, { 3, 7, 1 } } };
     if (seed <= 0) return def[harmony][k & 3];
     Rng r ((uint32_t) seed * 2654435761u + 12345u);
@@ -202,7 +233,17 @@ inline LayerChar layerChar (int seed, int k, int harmony = 2)
     static const int PM[6] = { 0, 0, -5, 5, 7, -12 };
     static const int PB[6] = { 0, 12, 12, 7, 19, 5 };
     static const int PA[6] = { 12, 7, 0, 12, 19, 24 };
-    const int* const sets[3][4] = { { OD, OM, OB, OA }, { FD, FM, FB, FA }, { PD, PM, PB, PA } };
+    // SUS: секунда и кварта (+2, +5, +14, +17, −7, −10)
+    static const int SD[6] = { -12, -12, -24, -7, -10, 0 }, SM[6] = { 0, 5, -7, 2, 0, 7 },
+                     SB[6] = { 12, 14, 5, 17, 12, 7 },     SA[6] = { 12, 19, 17, 24, 14, 12 };
+    // 7TH: малая септима (+10, −2, +22)
+    static const int TD[6] = { -12, -14, -24, -2, 0, -12 }, TM[6] = { 0, 10, -2, 7, 0, -5 },
+                     TB[6] = { 12, 10, 22, 7, 19, 12 },      TA[6] = { 22, 12, 19, 24, 10, 12 };
+    // 9TH: нона (+14, +2, −10)
+    static const int ND[6] = { -12, -10, -24, 0, -12, -5 }, NM[6] = { 0, 2, 7, -10, 14, 0 },
+                     NB[6] = { 14, 12, 7, 19, 2, 12 },      NA[6] = { 14, 26, 19, 12, 24, 7 };
+    const int* const sets[6][4] = { { OD, OM, OB, OA }, { FD, FM, FB, FA }, { SD, SM, SB, SA },
+                                    { TD, TM, TB, TA }, { ND, NM, NB, NA }, { PD, PM, PB, PA } };
     // текстуры: чаще чистая и лента, складка и крош — редкая приправа
     static const int TX[8] = { 0, 0, 0, 1, 1, 1, 2, 3 };
     LayerChar c[4];
@@ -272,6 +313,129 @@ struct Shifter
         }
         w = (w + 1) & mask;
         return y;
+    }
+};
+
+// ORGANISM: «живая кожа» звука. Mid/Side, тёплый лестничный фильтр с насыщением, полки, дыхание
+// (пока играешь — открыто и уже, в хвосте — темнее, шире, плотнее), уступающие частоты и нарастание хвостов.
+inline const char* organismName (int o) { static const char* n[5] = { "OFF", "TAPE", "CONSOLE", "GLASS", "ASH" }; return n[std::clamp (o, 0, 4)]; }
+struct OrgChar
+{
+    float body, bodyHz, dip, dipHz, open, closed, res, drive, sideHp, air, wPlay, wTail, yield, swell;
+};
+inline const OrgChar& orgChar (int o)
+{
+    //                                 body bodyHz dip  dipHz  open   closed res  drive sideHp air   wPlay wTail yield swell
+    static const OrgChar c[5] = { {     0,  150,   0,  1000, 20000, 20000,  0,  1.0f,  20,   0,   1.0f, 1.0f,  0,   0   },
+                                  { 3.0f, 180, 1.5f, 1200, 14000,  3500, .15f, 1.4f, 220, 1.0f, 1.0f, 1.25f, .5f, .6f },
+                                  { 1.5f, 120, 2.5f,  900, 18000,  6000, .05f, 1.8f, 150, 2.0f, 1.05f,1.15f, .4f, .3f },
+                                  {   0,  150, 3.5f, 1400, 20000,  9000, .10f, 1.1f, 380, 4.5f, 1.15f,1.7f,  .7f, .9f },
+                                  { 4.0f, 220, 4.0f,  800,  7000,  1600, .35f, 2.2f, 300, -3.0f,1.0f, 1.35f, .6f, 1.0f } };
+    return c[std::clamp (o, 0, 4)];
+}
+
+struct Organism
+{
+    double sr = 48000;
+    float breath = 1, mix = 0;              // дыхание 1 — открыт (играешь), 0 — выдох (хвост)
+    float body = 0, dipLow = 0, dipBp = 0, dipIc1 = 0, dipIc2 = 0;
+    float lad[4] {}, ladY = 0;
+    float sHp1 = 0, sHp2 = 0, airLp = 0;
+    float bLo[2] {}, bHi[2] {}, eD[3] {}, eW[3] {}, gY[3] { 1, 1, 1 };
+    float drift = 0, driftT = 0; int driftCnt = 0;
+    Rng rng { 0x0badf00du };
+    float aIn = 0, aOut = 0, aEnv = 0, aEnvR = 0, aG = 0, aSm = 0;
+    OrgChar cur = orgChar (0);
+    // коэффициенты обновляются раз в 16 сэмплов
+    int cCnt = 0;
+    float cBody = 0, gBody = 0, dA1 = 0, dA2 = 0, dA3 = 0, dK = 0, dGain = 0, cLad = 0, cSide = 0, gAir = 0, wNow = 1;
+    float c300 = 0, c2500 = 0, c6500 = 0;
+    void prepare (double s)
+    {
+        sr = s; breath = 1; mix = 0;
+        body = dipLow = dipBp = dipIc1 = dipIc2 = ladY = sHp1 = sHp2 = airLp = 0;
+        for (auto& v : lad) v = 0;
+        for (int i = 0; i < 3; ++i) { eD[i] = eW[i] = 0; gY[i] = 1; }
+        bLo[0] = bLo[1] = bHi[0] = bHi[1] = 0;
+        auto tc = [this] (double sec) { return (float) (1.0 - std::exp (-1.0 / (sec * sr))); };
+        aIn = tc (.3); aOut = tc (2.5); aEnv = tc (.01); aEnvR = tc (.2); aG = tc (.05); aSm = tc (.15);
+        c300 = op (300.0f); c2500 = op (2500.0f); c6500 = op (6500.0f); cCnt = 0;
+    }
+    float op (float fc) const { return (float) (1.0 - std::exp (-2.0 * 3.14159265358979 * std::min ((double) fc, sr * .45) / sr)); }
+    // play — 1 пока играешь, 0 в хвосте; dryMono — сухой сигнал для «уступающих частот»
+    void process (float& L, float& R, int character, float play, float dryMono)
+    {
+        // плавная смена характера (без щелчков): параметры скользят к новому характеру
+        const OrgChar& t = orgChar (character);
+        const float* tp = &t.body; float* cp = &cur.body;
+        for (int i = 0; i < 14; ++i) cp[i] += (tp[i] - cp[i]) * aSm * 16.0f / 16.0f;
+        mix += ((character > 0 ? 1.0f : 0.0f) - mix) * aSm;
+        if (mix < 1e-4f && character == 0) return;
+        breath += (play - breath) * (play > breath ? aIn : aOut);
+        if (--driftCnt <= 0) { driftCnt = 4800; driftT = rng.bi() * .03f; }   // разброс «деталей» ±3%
+        drift += (driftT - drift) * .0005f;
+
+        float m = .5f * (L + R), sd = .5f * (L - R);
+        const float m0 = m, s0 = sd;
+        const float b = breath, tail = 1 - b;
+        if (--cCnt <= 0)
+        {
+            cCnt = 16;
+            cBody = op (cur.bodyHz);
+            gBody = std::pow (10.0f, cur.body * (.6f + .4f * tail) / 20.0f) - 1.0f;
+            const float g = std::tan (3.14159265f * std::min (cur.dipHz, (float) sr * .45f) / (float) sr);
+            dK = 1.2f; dA1 = 1 / (1 + g * (g + dK)); dA2 = g * dA1; dA3 = g * dA2;
+            dGain = dK * (1.0f - std::pow (10.0f, -cur.dip / 20.0f));
+            cLad = op ((cur.closed + (cur.open - cur.closed) * b * b) * (1.0f + drift));
+            cSide = op (cur.sideHp);
+            gAir = std::pow (10.0f, cur.air / 20.0f) - 1.0f;
+            wNow = cur.wPlay + (cur.wTail - cur.wPlay) * tail;
+        }
+        // --- центр: тело внизу, провал «в носу», тёплый лестничный фильтр
+        body += (m - body) * cBody;
+        m += body * gBody;
+        {   // провал: полосовой SVF вокруг dipHz
+            const float v3 = m - dipIc2, v1 = dA1 * dipIc1 + dA2 * v3, v2 = dipIc2 + dA2 * dipIc1 + dA3 * v3;
+            dipIc1 = 2 * v1 - dipIc1; dipIc2 = 2 * v2 - dipIc2;
+            m -= v1 * dGain;
+        }
+        {   // лестничный фильтр: 4 ступени с насыщением, срез дышит
+            const float g = cLad;
+            const float dr = cur.drive;
+            float x = m - cur.res * 3.2f * ladY;
+            auto ft = [] (float v) { v = std::clamp (v, -3.0f, 3.0f); return v * (27.0f + v * v) / (27.0f + 9.0f * v * v); };   // быстрый tanh
+            for (int i = 0; i < 4; ++i) { lad[i] += g * (ft (x * dr) / dr - lad[i]); x = lad[i]; }
+            ladY = x;
+            m = x * (1.0f + cur.res * .8f);
+        }
+        // --- бока: низ остаётся в центре, сверху воздух, ширина дышит
+        sHp1 += (sd - sHp1) * cSide; float sh = sd - sHp1;
+        sHp2 += (sh - sHp2) * cSide; sh -= sHp2;
+        airLp += (sh - airLp) * c6500; const float airPart = sh - airLp;
+        sh += airPart * gAir;
+        sh *= wNow;
+        // --- уступающие частоты: где играет новое, хвост отступает (3 полосы, до −6 дБ)
+        if (cur.yield > 1e-3f)
+        {
+            float dB[3], wB[3];
+            bLo[0] += (dryMono - bLo[0]) * c300; bHi[0] += (dryMono - bHi[0]) * c2500;
+            dB[0] = bLo[0]; dB[1] = bHi[0] - bLo[0]; dB[2] = dryMono - bHi[0];
+            bLo[1] += (m - bLo[1]) * c300; bHi[1] += (m - bHi[1]) * c2500;
+            wB[0] = bLo[1]; wB[1] = bHi[1] - bLo[1]; wB[2] = m - bHi[1];
+            float out = 0;
+            for (int i = 0; i < 3; ++i)
+            {
+                const float ed = dB[i] * dB[i], ew = wB[i] * wB[i];
+                eD[i] += (ed - eD[i]) * (ed > eD[i] ? aEnv : aEnvR);
+                eW[i] += (ew - eW[i]) * (ew > eW[i] ? aEnv : aEnvR);
+                const float gt = std::max (.5f, 1.0f / (1.0f + cur.yield * 1.5f * eD[i] / (eW[i] + 1e-7f)));
+                gY[i] += (gt - gY[i]) * aG;
+                out += wB[i] * gY[i];
+            }
+            m = out;
+        }
+        L = m0 + s0 + mix * ((m + sh) - (m0 + s0));
+        R = m0 - s0 + mix * ((m - sh) - (m0 - s0));
     }
 };
 
@@ -642,6 +806,9 @@ public:
         k.clEnv = tc (.05); k.clAtk = tc (.02); k.clRel = tc (.3);
         k.trFast = tc (.001); k.trSlow = tc (.04); k.trAtk = tc (.0005); k.trRel = tc (.03);
         k.playRate = tc (1.2);
+        k.swFast = tc (.005); k.swSlow = tc (.3); k.swDrop = tc (.012);
+        k.tapeWow = (float) (2 * 3.14159265358979 * .63 / sr); k.tapeFl = (float) (2 * 3.14159265358979 * 6.7 / sr);
+        k.tapeDepth = (float) (.004 * sr); k.tapeHf = op (5500);
         k.chFade = tc (.008);
         k.agcEnv = tc (2.0); k.agcDown = tc (1.5); k.agcUp = tc (3.0);
         agcEnv = 0; agcG = 1; chFade = 1; chPending = false;
@@ -651,6 +818,9 @@ public:
         chaosSt.prepare (sr);
         reverb.prepare (sr);
         prism.prepare (sr);
+        organism.prepare (sr);
+        for (int j = 0; j < 4; ++j) { swF[j] = swS[j] = 0; swG[j] = 1; }
+        hallSwF = hallSwS = 0; hallSwG = 1;
         for (int c = 0; c < 2; ++c) { pinkB[c][0] = pinkB[c][1] = pinkB[c][2] = 0; crackEnv[c] = 0; crackLp[c] = 0; }
         k.crackDecay = (float) std::exp (-1.0 / (.00025 * sr));
         k.crackLp = op (6000);
@@ -705,13 +875,15 @@ public:
             const float damp = 5500.0f + 11000.0f * std::clamp (p.tone, 0.0f, 1.0f);   // хвост зала светлый, верх гаснет мягко
             reverb.configure (rt, size, damp);
             preDelay = (float) ((.015 + .06 * sp) * sr);
-            shimRatio = p.harmony == 1 ? 1.4983071f : 2.0f;   // квинта в 5TH, иначе октава
+            shimRatio = shimmerRatio (p.harmony);   // интервал шиммера по гармонии
+            nGrainRatios = harmonyRatios (p.harmony, grainRatios);
             auto op = [this] (double fc) { return (float) (1.0 - std::exp (-2.0 * 3.14159265358979 * std::min (fc, sr * .45) / sr)); };
             tailLoBase = std::clamp (p.tailLo, 15.0f, 4000.0f);
             tailHiBase = std::clamp (p.tailHi, 300.0f, 20000.0f);
             tailLoOff = p.tailLo <= 15.5f;          // крайнее левое — срез низа выключен
             tailHiOff = p.tailHi >= 19500.0f;       // крайнее правое — срез верха выключен (но хвост всё равно мягко темнеет)
             clarityT = p.clarity >= 0 ? p.clarity : -1.0f;
+            orgSel = std::clamp (p.organism, 0, 4);
             (void) op;
         }
         float inPk = 0, outPk = 0;
@@ -746,6 +918,7 @@ public:
             sTone += (p.tone - sTone) * k.smooth;
             sDepth += (p.depth - sDepth) * k.smooth;
             sChaos += (p.chaos - sChaos) * k.smooth;
+            sCore += (p.core - sCore) * k.smooth;
             sRuin += (p.ruin - sRuin) * k.smooth;
             sSpace += (p.space - sSpace) * k.smooth;
             sShim += (p.shimmer - sShim) * k.smooth;
@@ -835,7 +1008,7 @@ public:
                 fbg[c] = dg + (1 - dg) * fr;
             }
 
-            ln = 0;
+            ln = 0; sigL = sigR = 0;
             switch (curMode)
             {
                 case 0: grains (g, duck, fbg, wd, bloomAmt); break;
@@ -847,6 +1020,7 @@ public:
 
             float wl = 0, wr = 0;
             layerStage (wl, wr);
+            wl += sigL; wr += sigR; sigL = sigR = 0;
             blurStage (wl, wr);
             chaosSt.process (wl, wr, sChaos);   // всегда в цепи: включение CHAOS не сдвигает сигнал и не щёлкает
             if (sRuin > 1e-4f) { const float fl = sRuin * sRuin * .006f; wl += fl * hiss[0]; wr += fl * hiss[1]; }
@@ -855,7 +1029,15 @@ public:
             {
                 float rl, rr;
                 // зал слышит и сам вход: облако раскрывается сразу, не дожидаясь первого круга памяти
-                reverb.process (wl + dryL * .55f, wr + dryR * .55f, preDelay, sShim, shimRatio, rl, rr);
+                // нарастание зала: на новой ноте хвост зала стартует тише и вырастает
+                {
+                    const float a = .5f * (std::fabs (dryL) + std::fabs (dryR));
+                    hallSwF += (a - hallSwF) * k.swFast; hallSwS += (a - hallSwS) * k.swSlow;
+                    const float th = .8f * organism.cur.swell * organism.mix;
+                    if (th > .05f && hallSwF > hallSwS * 1.35f + 1e-3f) hallSwG += (.2f - hallSwG) * k.swDrop;
+                    else hallSwG += (1.0f - hallSwG) * (float) (1.0 - std::exp (-1.0 / (std::max (.05f, th) * sr)));
+                }
+                reverb.process ((wl + dryL * .55f) * hallSwG, (wr + dryR * .55f) * hallSwG, preDelay, sShim, shimRatio, rl, rr);
                 const float send = std::min (1.0f, sSpace * 1.4f) + sShim * .3f;
                 wl = wl * (1 - .35f * sSpace) + rl * send * 1.1f;
                 wr = wr * (1 - .35f * sSpace) + rr * send * 1.1f;
@@ -863,6 +1045,7 @@ public:
             }
             if (sPrism > 1e-4f) prism.process (wl, wr, sPrism, sDrift);
             clarity (wl, wr);
+            organism.process (wl, wr, orgSel, playF, .5f * (dryL + dryR));
             depthTone (wl, wr, .5f * (dryL + dryR));
             // TAIL: фильтр хвостов, 24 дБ/окт снизу и сверху
             {
@@ -919,7 +1102,9 @@ public:
         std::atomic<int> nLayers { 0 };
         std::atomic<int> chaosType { 0 }, erodeCount { 0 };
         std::atomic<float> chaosEnv { 0 }, ruin { 0 }, chaos { 0 }, lastErode { -1 };
-        std::atomic<float> space { 0 }, revLvl { 0 }, prism { 0 };
+        std::atomic<float> space { 0 }, revLvl { 0 }, prism { 0 }, core { .5f }, breath { 1 };
+        std::atomic<int> organism { 1 };
+        std::array<std::atomic<float>, 4> lSwell {};
         std::array<std::atomic<float>, 5> prismF {};
         std::array<std::atomic<int>, 4> lBand {}, lSemis {}, lTex {};
         std::array<std::atomic<float>, 4> lLvl {};
@@ -1040,7 +1225,7 @@ private:
         addLayer (sumS * .35f * .85f, 1, 1);
     }
 
-    struct GrainSet { int P = 1000, ph = 0; int start[4] {}; float amp[4] {}; int idx[4] {}; };
+    struct GrainSet { int P = 1000, ph = 0; int start[4] {}; float amp[4] {}; int idx[4] {}; float rate[4] { 1, 1, 1, 1 }; int rdir[4] { 1, 1, 1, 1 }; };
     template <typename F>
     float grainSet (GrainSet& s, int len, F pickU)
     {
@@ -1051,15 +1236,22 @@ private:
             if (vph >= s.P) vph -= s.P;
             if (vph == 0)
             {
-                float u = pickU();
+                // CORE: часть гранул звучит на другой высоте (по HARMONY) и задом наперёд
+                const float pPitch = std::max (0.0f, sCore - .25f) * .85f;
+                const float pRev = std::max (0.0f, sCore - .45f) * .55f;
+                s.rate[v] = (rng.uni() < pPitch && nGrainRatios > 0) ? grainRatios[rng.next() % (uint32_t) nGrainRatios] : 1.0f;
+                s.rdir[v] = rng.uni() < pRev ? -1 : 1;
+                float u = pickU() * (.6f + .8f * sCore);
                 u -= std::floor (u);
-                const int D = s.P + (int) (u * (float) std::max (1, len - 2 * s.P));
+                const int minD = (int) ((float) s.P * (1.0f + std::max (0.0f, s.rate[v] - 1.0f))) + 4;
+                const int D = minD + (int) (u * (float) std::max (1, len - minD - s.P));
                 s.start[v] = wrap (((w[0] - dir * D) % len + len) % len, len);
             }
-            const int idx = ((s.start[v] + dir * vph) % len + len) % len;
+            const float fpos = (float) s.start[v] + (float) (dir * s.rdir[v]) * (float) vph * s.rate[v];
             const float a = 1.0f - std::fabs (2.0f * (float) vph / (float) s.P - 1.0f);
-            s.amp[v] = a; s.idx[v] = idx;
-            sum += at (0, idx) * a;
+            float pw = fpos; const float L = (float) len; pw -= std::floor (pw / L) * L;
+            s.amp[v] = a; s.idx[v] = (int) pw;
+            sum += readFrac (0, pw) * a;
         }
         if (++s.ph >= s.P) s.ph = 0;
         return sum;
@@ -1078,7 +1270,7 @@ private:
         for (int s = 0; s < 4; ++s)
         {
             const int c = s & 1;
-            const float apG = .55f * (1 - .5f * std::min (1.0f, fbg[c]));
+            const float apG = (.35f + .4f * sCore) * (1 - .5f * std::min (1.0f, fbg[c]));   // CORE: гуще облако
             const float fbStage = .91f * fbg[c] + (fbg[c] > .999f ? .09f : 0.0f);
             const float prev = dOut[(s + 3) & 3] * fbStage;
             const float x = degrade (deg[s], prev, rg[c]) * duck[c];
@@ -1104,7 +1296,8 @@ private:
             dCell = (apOut - v * apG) * xf + dCell * (1 - xf);
         }
         // дрейф длины двух первых allpass: ±0.2% высоты, проход за минуту-две
-        const float m0 = std::min (k.modM0, (float) lay.len[0] * .25f), m1 = std::min (k.modM1, (float) lay.len[2] * .25f);
+        const float mk = .5f + sCore;
+        const float m0 = std::min (k.modM0 * mk, (float) lay.len[0] * .25f), m1 = std::min (k.modM1 * mk, (float) lay.len[2] * .25f);
         mod[0] += modInc[0]; if (mod[0] >= m0) { mod[0] = m0; modInc[0] = -.002112f; } else if (mod[0] <= 0) { mod[0] = 0; modInc[0] = .002112f; }
         mod[1] += modInc[1]; if (mod[1] >= m1) { mod[1] = m1; modInc[1] = -.0018099f; } else if (mod[1] <= 0) { mod[1] = 0; modInc[1] = .0018099f; }
     }
@@ -1127,6 +1320,25 @@ private:
             x[l] *= b;
             writeLine (l, deg[l], x[l] * fbg[ch] * cap + g[ch] * b, wd);
         }
+        // CORE: россыпь отражений — отводы из глубины каждой линии, по очереди слева и справа
+        {
+            static const float fr[8] = { .23f, .61f, .37f, .83f, .29f, .71f, .47f, .91f };
+            const float gT = std::max (0.0f, sCore - .2f) * .5f;
+            if (gT > 1e-4f)
+            {
+                float tl = 0, tr = 0;
+                for (int l = 0; l < 4; ++l)
+                    for (int t2 = 0; t2 < 2; ++t2)
+                    {
+                        const float v = at (l, wrap (w[l] + (int) ((float) lay.len[l] * fr[l * 2 + t2]), lay.len[l]));
+                        if (((l + t2) & 1) == 0) tl += v; else tr += v;
+                    }
+                // отражения темнее прямого звука: двойной однополюсный фильтр сглаживает треск и края эрозии
+                tapLp[0] += (tl - tapLp[0]) * k.tapeHf; tapLp[1] += (tapLp[0] - tapLp[1]) * k.tapeHf;
+                tapLp[2] += (tr - tapLp[2]) * k.tapeHf; tapLp[3] += (tapLp[2] - tapLp[3]) * k.tapeHf;
+                sigL += tapLp[1] * gT; sigR += tapLp[3] * gT;
+            }
+        }
         const float d = sDrift;
         const float A = lfo[0].v, B = lfo[1].v, C = lfo[2].v, D = lfo[3].v;
         addLayer (x[0], (1 - A * d) * .7f, A * d * .7f);
@@ -1138,7 +1350,18 @@ private:
     // ===== 3 TAPES: две петли неравной длины с перекрёстной связью
     void tapes (const float* g, const float* duck, const float* fbg, float wd, float bloomAmt)
     {
-        const float o0 = at (0, w[0]), o1 = at (1, w[1]);
+        // CORE: плёнка плывёт (wow + flutter) и греется; качание копится от круга к кругу, как на старой ленте
+        tapeWow += k.tapeWow; if (tapeWow > 6.2831853f) tapeWow -= 6.2831853f;
+        tapeFl += k.tapeFl;   if (tapeFl > 6.2831853f) tapeFl -= 6.2831853f;
+        const float depth = sCore * sCore * k.tapeDepth;
+        const float off0 = 2.0f + depth * (1.0f + .75f * std::sin (tapeWow) + .25f * std::sin (tapeFl));
+        const float off1 = 2.0f + depth * (1.0f + .75f * std::sin (tapeWow + 1.9f) + .25f * std::sin (tapeFl * 1.13f + .7f));
+        float o0 = readFrac (0, (float) w[0] + (float) dir * off0), o1 = readFrac (1, (float) w[1] + (float) dir * off1);
+        const float grit = std::max (0.0f, sCore - .3f) * .25f;
+        o0 += grit * (o0 * std::fabs (o0) - .3f * o0 * o0); o1 += grit * (o1 * std::fabs (o1) - .3f * o1 * o1);
+        tapeHf[0] += (o0 - tapeHf[0]) * k.tapeHf; tapeHf[1] += (o1 - tapeHf[1]) * k.tapeHf;
+        const float hl = std::max (0.0f, sCore - .4f) * .6f;   // плёнка теряет верх
+        o0 += hl * (tapeHf[0] - o0); o1 += hl * (tapeHf[1] - o1);
         const float c = sSpread * (rg[0] + rg[1]) * .5f, a = 1 - .49f * c, nn = 1.0f / std::sqrt (a * a + .2601f * c * c);
         float x[2] = { (a * o0 + .51f * c * o1) * nn, (a * o1 + .51f * c * o0) * nn };
         for (int l = 0; l < 2; ++l)
@@ -1149,9 +1372,22 @@ private:
             x[l] *= b;
             writeLine (l, deg[l], x[l] * fbg[l] * cap + g[l] * b, wd);
         }
+        // CORE: «головка эха» близко к записи — плывущее эхо слышно сразу, не через круг ленты
+        const float hg = .5f * std::max (0.0f, sCore - .35f) / .65f;
+        float h0 = 0, h1 = 0;
+        if (hg > 1e-4f)
+        {
+            const float sr = (float) this->sr;
+            const float dh = sr * (.42f + .35f * sCore) + 3 * depth * (1.0f + std::sin (tapeWow + .4f));
+            h0 = readFrac (0, (float) w[0] - (float) dir * dh);
+            h1 = readFrac (1, (float) w[1] - (float) dir * (dh * 1.31f));
+            h0 += grit * (h0 * std::fabs (h0)); h1 += grit * (h1 * std::fabs (h1));
+            tapeHh[0] += (h0 - tapeHh[0]) * k.tapeHf; tapeHh[1] += (h1 - tapeHh[1]) * k.tapeHf;
+            h0 = hg * tapeHh[0]; h1 = hg * tapeHh[1];
+        }
         const float d = sDrift, A = lfo[0].v, B = lfo[1].v;
-        addLayer (x[0], 1 - A * d, A * d);
-        addLayer (x[1], B * d, 1 - B * d);
+        addLayer (x[0] + h0, 1 - A * d, A * d);
+        addLayer (x[1] + h1, B * d, 1 - B * d);
         // ещё две головки чтения посреди лент — появляются вместе со слоями
         const float t0 = at (0, wrap (w[0] + lay.len[0] / 2, lay.len[0]));
         const float t1 = at (1, wrap (w[1] + (int) ((float) lay.len[1] * .37f), lay.len[1]));
@@ -1209,6 +1445,21 @@ private:
                 y += la * (bandFilter (lband[j], ch[j].band, y) - y);
                 y += la * (texture (lband[j], ch[j].tex, y) - y);
             }
+            // нарастание: на новом материале слой проседает и плавно вырастает (время — по полосе и ORGANISM)
+            {
+                static const float swT[4] = { 1.2f, 0.0f, .6f, 1.6f };
+                const float tsw = swT[ch[j].band] * organism.cur.swell * organism.mix;
+                const float a = std::fabs (lx[j]);
+                swF[j] += (a - swF[j]) * k.swFast; swS[j] += (a - swS[j]) * k.swSlow;
+                if (tsw > .05f)
+                {
+                    if (swF[j] > swS[j] * 1.35f + 1e-3f) swG[j] += (.15f - swG[j]) * k.swDrop;
+                    else swG[j] += (1.0f - swG[j]) * (float) (1.0 - std::exp (-1.0 / (tsw * sr)));
+                }
+                else swG[j] += (1.0f - swG[j]) * k.swDrop;
+                y *= swG[j];
+                swellT[j] = tsw;
+            }
             const float pos = ln == 3 ? pos3[j] : pos4[j];
             const float th = (pos + 1) * .25f * 3.14159265f;
             const float e = std::max (.5f, std::sqrt (lgl[j] * lgl[j] + lgr[j] * lgr[j]));
@@ -1230,7 +1481,9 @@ private:
     // а слишком резкие атаки мокрого сигнала сглаживаются — звук не бьёт «в лоб».
     void clarity (float& wl, float& wr)
     {
-        const float amt = clarityT >= 0 ? clarityT : .6f + .4f * sSpace;
+        // сила зависит от организма: OFF не трогает атаки и середину, ASH прижимает сильнее всех
+        static const float orgCl[5] = { 0.0f, .6f, .45f, .8f, 1.0f };
+        const float amt = clarityT >= 0 ? clarityT : orgCl[orgSel] * (.6f + .4f * sSpace);
         if (amt <= 1e-4f) return;
         float x[2] = { wl, wr }, mid[2];
         for (int c = 0; c < 2; ++c)
@@ -1375,6 +1628,8 @@ private:
         viz.chaosType.store (chaosSt.type); viz.chaosEnv.store (chaosSt.type == 5 ? 1.0f - chaosSt.dropG : chaosSt.m);
         viz.ruin.store (sRuin); viz.chaos.store (sChaos); viz.lastErode.store (lastErode); viz.erodeCount.store (erodeCount);
         viz.space.store (sSpace); viz.revLvl.store (revLvl); viz.prism.store (sPrism);
+        viz.core.store (sCore); viz.breath.store (organism.breath); viz.organism.store (orgSel);
+        for (int j = 0; j < 4; ++j) viz.lSwell[(size_t) j].store (swellT[j]);
         for (int j = 0; j < 5; ++j) viz.prismF[(size_t) j].store (prism.freq (j));
         for (int j = 0; j < 4; ++j)
         {
@@ -1392,6 +1647,8 @@ private:
         float bass = 0, sub2 = 0, monoLo = 0, envAtkS = 0, envRelS = 0, envSlowS = 0;
         float cl300 = 0, cl3000 = 0, clEnv = 0, clAtk = 0, clRel = 0, trFast = 0, trSlow = 0, trAtk = 0, trRel = 0, playRate = 0;
         float chFade = 0, agcEnv = 0, agcDown = 0, agcUp = 0;
+        float tapeWow = 0, tapeFl = 0, tapeDepth = 0, tapeHf = 0;
+        float swFast = 0, swSlow = 0, swDrop = 0;
         float crackDecay = 0, crackLp = 0;
         int crushN = 6;
     } k;
@@ -1425,6 +1682,11 @@ private:
     float sSpace = 0, sShim = 0, sPrism = 0, preDelay = 1000, shimRatio = 2, revLvl = 0;
     float tLoA = 0, tHiA = 1, sTLo = 0, sTHi = 1, tf[2][8] {};
     float agcEnv = 0, agcG = 1, chFade = 1, monoAmt = 0;
+    float sCore = .5f, sigL = 0, sigR = 0, tapeWow = 0, tapeFl = 0, tapeHf[2] {}, tapeHh[2] {}, tapLp[4] {};
+    float grainRatios[6] { .5f, 2.0f }; int nGrainRatios = 2;
+    Organism organism;
+    int orgSel = 1;
+    float swF[4] {}, swS[4] {}, swG[4] { 1, 1, 1, 1 }, swellT[4] {}, hallSwF = 0, hallSwS = 0, hallSwG = 1;
     bool chPending = false;
     LayerChar pendingCh[4];
     float tailLoBase = 40, tailHiBase = 16000, playF = 1, clarityT = -1;

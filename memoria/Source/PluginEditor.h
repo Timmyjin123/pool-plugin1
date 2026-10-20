@@ -75,6 +75,27 @@ private:
     std::unique_ptr<juce::ParameterAttachment> att;
 };
 
+// Компактный переключатель «◀ ЗНАЧЕНИЕ ▶» для параметра-выбора
+class Stepper : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    Stepper (MemoriaProcessor&, const char* paramId, const juce::String& caption);
+    void paint (juce::Graphics&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void mouseEnter (const juce::MouseEvent&) override { hover = true; repaint(); }
+    void mouseExit (const juce::MouseEvent&) override { hover = false; repaint(); }
+    void setAccent (juce::Colour c) { accent = c; repaint(); }
+private:
+    void step (int d);
+    juce::String caption;
+    juce::StringArray names;
+    int cur = 0;
+    bool hover = false;
+    juce::Colour accent { juce::Colours::white };
+    std::unique_ptr<juce::ParameterAttachment> att;
+};
+
 // Кнопка-чип: переключатель, циклический выбор или действие
 class Chip : public juce::Component, public juce::SettableTooltipClient, private juce::Timer
 {
@@ -109,6 +130,12 @@ public:
     ~MemoryRing() override { stopTimer(); }
     void paint (juce::Graphics&) override;
     void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseMove (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override { coreHover = false; }
+    void mouseDoubleClick (const juce::MouseEvent&) override;
 private:
     void timerCallback() override;
     MemoriaProcessor& proc;
@@ -118,6 +145,11 @@ private:
     int nBins = 0;
     float rot = 0, lvl = 0, inLvl = 0, t = 0;
     int lastErodeSeen = 0;
+    std::unique_ptr<juce::ParameterAttachment> coreAtt;
+    juce::RangedAudioParameter* corePar = nullptr;
+    bool coreHover = false, coreDrag = false;
+    float dragStartVal = .5f, dragStartY = 0;
+    bool overCore (juce::Point<float> p) const;
     float erodeFlash = 0, erodePos = -1;
     struct Star { float x, y, s, a, tw; };
     std::vector<Star> stars;
@@ -170,7 +202,8 @@ private:
     MemoryRing ring;
     LayerPanel layerPanel;
     TailRange tailRange;
-    Segments modeSeg, sizeSeg, harmSeg;
+    Segments modeSeg, sizeSeg;
+    Stepper harmStep, orgStep;
     juce::OwnedArray<Knob> knobs;
     juce::OwnedArray<Chip> chips;
     juce::ComboBox presetBox;

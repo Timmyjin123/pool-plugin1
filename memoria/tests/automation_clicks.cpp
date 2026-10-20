@@ -70,7 +70,15 @@ int main()
         { "RUIN 0 → .7",                   flow,  [&] (Params& p, double t) { p.ruin = t < 6 ? 0.0f : .7f; } },
         { "LO-CUT 0 → 3, HI-CUT 0 → 3",    drone, [&] (Params& p, double t) { p.lowcut = t < 6 ? 0 : 3; p.highcut = t < 6 ? 0 : 3; } },
         { "DRIFT 0 → 1",                   flow,  [&] (Params& p, double t) { p.drift = t < 6 ? 0.0f : 1.0f; } },
-        { "SEED смена (DICE)",             drone, [&] (Params& p, double t) { p.layers = .8f; p.layerSeed = t < 6 ? 0 : 404; } },
+        { "CORE ручкой 0 → 1 (Tapes)",     echo,  [&] (Params& p, double t) { p.mode = 3; p.core = (float) ramp (t, 0, 1, 5, 6); } },
+        { "CORE скачком 0 → 1 (Grains)",   flow,  [&] (Params& p, double t) { p.mode = 0; p.core = t < 6 ? 0.0f : 1.0f; } },
+        { "CORE скачком 1 → 0 (Diffuse)",  drone, [&] (Params& p, double t) { p.mode = 1; p.core = t < 6 ? 1.0f : 0.0f; } },
+        { "CORE ручкой (Network)",         echo,  [&] (Params& p, double t) { p.mode = 2; p.core = (float) ramp (t, .1, .95, 5, 5.5); } },
+        { "ORGANISM TAPE → ASH",           flow,  [&] (Params& p, double t) { p.organism = t < 6 ? 1 : 4; } },
+        { "ORGANISM OFF → GLASS",          hall,  [&] (Params& p, double t) { p.organism = t < 6 ? 0 : 3; } },
+        { "HARMONY OCT → 9TH",             drone, [&] (Params& p, double t) { p.layers = .8f; p.harmony = t < 6 ? 0 : 4; } },
+        { "HARMONY SUS → 7TH (шиммер)",    hall,  [&] (Params& p, double t) { p.shimmer = .6f; p.harmony = t < 6 ? 2 : 3; } },
+        { "SEED смена (DICE)",            drone, [&] (Params& p, double t) { p.layers = .8f; p.layerSeed = t < 6 ? 0 : 404; } },
     };
     // смена пресетов подряд
     for (int k = 0; k < 6; ++k)

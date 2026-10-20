@@ -171,7 +171,7 @@ int main()
         for (int seed : { 0, 9, 31, 42, 51, 101, 222, 404, 666, 999 })
         {
             double ik, of; pcEnergy (0, seed, ik, of); worst = std::max (worst, of / ik);
-            pcEnergy (2, seed, ik, of); freeWorst = std::max (freeWorst, of / ik);
+            pcEnergy (5, seed, ik, of); freeWorst = std::max (freeWorst, of / ik);
         }
         std::printf ("  доля чужих нот: OCT %.3f, FREE %.3f\n", worst, freeWorst);
         CHECK (worst < .05, "OCT: чужие ноты не появляются ни на одном наборе");

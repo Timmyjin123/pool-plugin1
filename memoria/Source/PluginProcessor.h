@@ -33,7 +33,7 @@ public:
 
     void erase() { engine.requestErase(); }
     // VARY: какие параметры гуляют и их текущие (нормированные 0..1) значения
-    static constexpr int kVary = 9;
+    static constexpr int kVary = 10;
     static const char* varyId (int i);
     float varyEffective (int i) const { return varyEff[(size_t) i].load(); }
     bool varyActive (int i) const { return std::fabs (varyOff[i]) > .004f; }
