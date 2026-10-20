@@ -1,0 +1,46 @@
+name: memoria
+on:
+  push:
+    paths:
+      - 'memoria/**'
+      - '.github/workflows/memoria.yml'
+  workflow_dispatch:
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: memoria
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Engine test
+        if: runner.os == 'macOS'
+        run: |
+          cmake --build build --config Release --target memoria_engine_test
+          ./build/memoria_engine_test
+      - name: Build
+        run: cmake --build build --config Release --target Memoria_VST3 Memoria_Standalone ${{ matrix.os == 'macos-latest' && 'Memoria_AU' || '' }} --parallel
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path out | Out-Null
+          Copy-Item -Recurse "build/Memoria_artefacts/Release/VST3/Memoria.vst3" out/
+          Copy-Item -Recurse "build/Memoria_artefacts/Release/Standalone/Memoria.exe" out/
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir out
+          cp -R build/Memoria_artefacts/Release/VST3/Memoria.vst3 out/
+          cp -R build/Memoria_artefacts/Release/AU/Memoria.component out/
+          cp -R build/Memoria_artefacts/Release/Standalone/Memoria.app out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Memoria-${{ runner.os }}
+          path: memoria/out

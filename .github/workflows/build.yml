@@ -1,6 +1,9 @@
 name: build
 on:
   push:
+    paths-ignore:
+      - 'memoria/**'
+      - '.github/workflows/memoria.yml'
   workflow_dispatch:
 jobs:
   build:
