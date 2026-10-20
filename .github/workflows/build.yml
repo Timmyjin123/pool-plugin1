@@ -1,0 +1,35 @@
+name: build
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --target Pool_VST3 Pool_Standalone ${{ matrix.os == 'macos-latest' && 'Pool_AU' || '' }} --parallel
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path out | Out-Null
+          Copy-Item -Recurse "build/Pool_artefacts/Release/VST3/Pool.vst3" out/
+          Copy-Item -Recurse "build/Pool_artefacts/Release/Standalone/Pool.exe" out/
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir out
+          cp -R build/Pool_artefacts/Release/VST3/Pool.vst3 out/
+          cp -R build/Pool_artefacts/Release/AU/Pool.component out/
+          cp -R build/Pool_artefacts/Release/Standalone/Pool.app out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pool-${{ runner.os }}
+          path: out
