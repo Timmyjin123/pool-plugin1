@@ -258,6 +258,17 @@ PoolEditor::PoolEditor (PoolProcessor& p) : AudioProcessorEditor (&p), proc (p),
     presets.setSelectedId (proc.getCurrentProgram() + 1, juce::dontSendNotification);
     presets.onChange = [this] { const int id = presets.getSelectedId(); if (id >= 2) proc.applyPreset (id - 2); };
     addAndMakeVisible (presets);
+    prevBtn.setButtonText (U ("◀")); nextBtn.setButtonText (U ("▶"));
+    auto step = [this] (int d)
+    {
+        const int n = (int) presetDefs().size();
+        const int cur = proc.getCurrentProgram() - 1;
+        const int nx = ((cur < 0 ? (d > 0 ? -1 : 0) : cur) + d + n) % n;
+        proc.applyPreset (nx);
+    };
+    prevBtn.onClick = [step] { step (-1); };
+    nextBtn.onClick = [step] { step (1); };
+    addAndMakeVisible (prevBtn); addAndMakeVisible (nextBtn);
 
     freezeBtn.setButtonText (U ("Заморозка"));
     freezeBtn.setClickingTogglesState (true);
@@ -329,7 +340,9 @@ void PoolEditor::resized()
     auto top = r.removeFromTop (36);
     randBtn.setBounds (top.removeFromRight (100)); top.removeFromRight (8);
     freezeBtn.setBounds (top.removeFromRight (110)); top.removeFromRight (8);
-    presets.setBounds (top.removeFromRight (230));
+    nextBtn.setBounds (top.removeFromRight (36)); top.removeFromRight (4);
+    presets.setBounds (top.removeFromRight (230)); top.removeFromRight (4);
+    prevBtn.setBounds (top.removeFromRight (36));
     r.removeFromTop (10);
     visual.setBounds (r.removeFromTop (330));
     r.removeFromTop (10);

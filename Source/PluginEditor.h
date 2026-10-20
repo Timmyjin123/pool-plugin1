@@ -86,7 +86,7 @@ private:
     poolui::PoolLook look;
     VisualComp visual;
     juce::ComboBox presets;
-    juce::TextButton freezeBtn, randBtn;
+    juce::TextButton freezeBtn, randBtn, prevBtn, nextBtn;
     juce::OwnedArray<juce::TextButton> tabs;
     juce::OwnedArray<KnobComp> knobs;
     juce::TooltipWindow tooltip { this, 600 };

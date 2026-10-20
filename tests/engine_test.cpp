@@ -84,5 +84,22 @@ int main()
         std::printf ("  far +12: @440=%.5f @220=%.5f\n", a440, a220);
         CHECK (a440 > 2 * a220, "далёкий голос на октаву выше");
     }
+
+    // фиксация ноты пэда: любой вход -> 440 Гц (MIDI 69)
+    for (double fin : { 196.0, 300.0 })
+    {
+        Engine e4; e4.prepare (sr); e4.setOffline (true);
+        EngineParams Q; Q.dw = 1; Q.dens = 0.05f; Q.drive = 1; Q.rvm = 0; Q.dm = 0; Q.farLevel = 0; Q.pad = 1; Q.pdr = 0; Q.pdark = 12000; Q.pwarm = 0; Q.pnote = 69; Q.vol = .8f; Q.hp = 20; Q.lp = 18000;
+        std::vector<float> out; double p4 = 0;
+        for (int b = 0; b < (int) (sr * 12 / block); ++b)
+        {
+            for (int i = 0; i < block; ++i) { in[(size_t) i] = (float) (.4 * std::sin (p4)); p4 += kTwoPi * fin / sr; }
+            e4.process (in.data(), nullptr, l.data(), r.data(), block, Q);
+            if (b > (int) (sr * 6 / block)) out.insert (out.end(), l.begin(), l.end());
+        }
+        const double a440 = goertzel (out, 440, sr), aIn = goertzel (out, fin, sr);
+        std::printf ("  lock A4, in %.0f Hz: @440=%.5f @in=%.5f\n", fin, a440, aIn);
+        CHECK (a440 > 4 * aIn, "пэд подтянут к выбранной ноте");
+    }
     return fails ? 1 : 0;
 }

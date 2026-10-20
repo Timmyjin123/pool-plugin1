@@ -14,6 +14,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout PoolProcessor::makeLayout()
             .withStringFromValueFunction ([s] (float x, int)
             {
                 const float v = paramToValue (s, x);
+                if (juce::String (s.id) == "pnote")
+                {
+                    static const char* nm[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+                    const int n = (int) std::lround (v);
+                    if (n < 1) return juce::String::fromUTF8 ("выкл");
+                    const int m = n + 23;
+                    return juce::String (nm[m % 12]) + juce::String (m / 12 - 1);
+                }
                 const float a = std::fabs (v);
                 juce::String t = (s.mn == 0 && s.mx == 1 && ! *s.unit) ? juce::String (juce::roundToInt (v * 100)) + "%"
                                   : juce::String (v, a >= 100 ? 0 : (a >= 10 ? 1 : 2));
@@ -83,6 +91,10 @@ EngineParams PoolProcessor::makeParams (double dt, int)
     e.ipitch = v[P_ipitch]; e.dw = v[P_dw]; e.size = v[P_size]; e.dens = v[P_dens]; e.pos = v[P_pos]; e.pj = v[P_pj];
     e.pitch = v[P_pitch]; e.ps = v[P_ps]; e.harm = v[P_harm]; e.rev = v[P_rev]; e.wid = v[P_wid]; e.glitch = v[P_glitch];
     e.crush = v[P_crush]; e.freeze = isFrozen();
+    const float stab = v[P_pstab];
+    e.ppos = clampf (v[P_pos] + (paramToValue (S[P_pos], getBase (P_pos)) - v[P_pos]) * stab, 0.f, 1.f);
+    e.ppj = v[P_pj] * (1.0f - stab);
+    e.pnote = v[P_pnote] < .5f ? 0 : (int) std::lround (v[P_pnote]) + 23;
     e.pad = v[P_pad]; e.pdr = v[P_pdr]; e.pwid = v[P_pwid]; e.ppitch = v[P_ppitch]; e.pdark = v[P_pdark]; e.pwarm = v[P_pwarm];
     e.farLevel = v[P_far]; e.freg = v[P_freg]; e.fcl = v[P_fcl]; e.fdist = v[P_fdist]; e.fenv = fenv;
     e.drive = v[P_drive]; e.hp = v[P_hp]; e.lp = v[P_lp]; e.dt = v[P_dt]; e.df = v[P_df]; e.dm = v[P_dm]; e.rvm = v[P_rvm]; e.vol = v[P_vol];

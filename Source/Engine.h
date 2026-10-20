@@ -339,6 +339,7 @@ private:
 struct SpecParams
 {
     float pos = .5f, pj = 0, pdr = 0, pwid = 1, ppitch = 0, freg = 12, fcl = 0;
+    int note = 0;               // 0 — выкл, иначе MIDI-нота, к которой подтягивается основной тон
     bool doPad = false, doFar = false;
     int head = 0;
 };
@@ -352,10 +353,10 @@ public:
     ~SpectralLayers() { stop(); }
 
     // buffer — кольцевой буфер зёрен (читается только из рабочего потока)
-    void start (const float* buffer, int length, uint32_t seed)
+    void start (const float* buffer, int length, uint32_t seed, double sampleRate)
     {
         stop();
-        buf = buffer; L = length;
+        buf = buffer; L = length; sr = sampleRate;
         rng = Rng (seed);
         re.assign (N, 0); im.assign (N, 0); mag.assign (H + 1, 0);
         xlr.assign (H, 0); xli.assign (H, 0); xrr.assign (H, 0); xri.assign (H, 0);
@@ -455,12 +456,33 @@ private:
         }
         const float* tc = TC.data(); const float* ts = TS.data();
 
+        // Фиксация ноты: находим сильнейший тон в 40..1500 Гц и подтягиваем его к выбранной ноте
+        double lockR = 1.0;
+        if (P.note > 0)
+        {
+            const int k0 = std::max (2, (int) (40.0 * N / sr)), k1 = std::min (H - 3, (int) (1500.0 * N / sr));
+            double best = 0; int kb = -1;
+            for (int k = k0; k <= k1; ++k)
+            {
+                const double m = mag[(size_t) k - 2] + mag[(size_t) k - 1] + mag[(size_t) k] + mag[(size_t) k + 1] + mag[(size_t) k + 2];
+                if (m > best) { best = m; kb = k; }
+            }
+            if (kb > 0 && best > 1e-9)
+            {
+                const double a = std::log (mag[(size_t) kb - 1] + 1e-12), b = std::log (mag[(size_t) kb] + 1e-12), c = std::log (mag[(size_t) kb + 1] + 1e-12);
+                const double den = a - 2 * b + c, off = std::fabs (den) > 1e-9 ? .5 * (a - c) / den : 0.0;
+                const double hz = (kb + std::max (-.5, std::min (.5, off))) * sr / N;
+                const double target = 440.0 * std::pow (2.0, (P.note - 69) / 12.0);
+                lockR = std::max (.125, std::min (8.0, target / hz));
+            }
+        }
+
         if (P.doPad)
         {
             std::fill (xlr.begin(), xlr.end(), 0.0); std::fill (xli.begin(), xli.end(), 0.0);
             std::fill (xrr.begin(), xrr.end(), 0.0); std::fill (xri.begin(), xri.end(), 0.0);
             const double dr = P.pdr, GN[4] = { 1, dr, dr * .7, dr * .45 };
-            const double wd = P.pwid, pr = std::pow (2.0, P.ppitch / 12.0);
+            const double wd = P.pwid, pr = std::pow (2.0, P.ppitch / 12.0) * lockR;
             for (int v = 0; v < 4; ++v)
             {
                 const double g = GN[v];
@@ -484,7 +506,7 @@ private:
         {
             std::fill (xlr.begin(), xlr.end(), 0.0); std::fill (xli.begin(), xli.end(), 0.0);
             std::fill (xrr.begin(), xrr.end(), 0.0); std::fill (xri.begin(), xri.end(), 0.0);
-            const double Rg = std::pow (2.0, P.freg / 12.0), sh = P.fcl, wd = P.pwid;
+            const double Rg = std::pow (2.0, P.freg / 12.0) * lockR, sh = P.fcl, wd = P.pwid;
             for (int v = 0; v < 4; ++v)
             {
                 const double g = FG[v], r = FV[v] * Rg;
@@ -539,6 +561,7 @@ private:
     FFT fft;
     const float* buf = nullptr;
     int L = 0;
+    double sr = 48000;
     Rng rng;
     std::vector<double> re, im, mag, xlr, xli, xrr, xri, accL, accR, accFL, accFR;
     std::vector<float> pwin, TC, TS;
@@ -707,6 +730,8 @@ struct EngineParams
     float ipitch = 0, dw = .8f;
     float size = 300, dens = 20, pos = .5f, pj = .3f, pitch = 0, ps = 0, harm = 0, rev = 0, wid = .8f, glitch = 0, crush = 0;
     bool freeze = false;
+    float ppos = .5f, ppj = .3f;   // позиция/разброс для пэда и далёкого голоса (стабильные)
+    int pnote = 0;
     float pad = .55f, pdr = .35f, pwid = .9f, ppitch = 0, pdark = 4500, pwarm = .25f;
     float farLevel = .5f, freg = 12, fcl = .6f, fdist = .5f, fenv = 1;
     float drive = 1.5f, hp = 60, lp = 12000, dt = .4f, df = .4f, dm = .3f, rvm = .5f, vol = .7f;
@@ -728,7 +753,7 @@ public:
         grains.prepare (sr);
         pitch.setSampleRate (sr);
         pitch.reset();
-        spec.start (grains.data(), grains.length(), 0xBADC0DEu);
+        spec.start (grains.data(), grains.length(), 0xBADC0DEu, sr);
         wasAct = false;
         for (int c = 0; c < 2; ++c)
         {
@@ -792,7 +817,7 @@ private:
         grains.process (xi, gL, gR, m, gp);
 
         SpecParams sp;
-        sp.pos = P.pos; sp.pj = P.pj; sp.pdr = P.pdr; sp.pwid = P.pwid; sp.ppitch = P.ppitch; sp.freg = P.freg; sp.fcl = P.fcl;
+        sp.pos = P.ppos; sp.pj = P.ppj; sp.note = P.pnote; sp.pdr = P.pdr; sp.pwid = P.pwid; sp.ppitch = P.ppitch; sp.freg = P.freg; sp.fcl = P.fcl;
         sp.doPad = P.pad > .01f; sp.doFar = P.farLevel > .01f; sp.head = grains.head();
         const bool act = sp.doPad || sp.doFar;
         if (act)
