@@ -449,13 +449,16 @@ MemoriaEditor::MemoriaEditor (MemoriaProcessor& p)
     struct K { const char* id; const char* title; bool bip; };
     for (auto k : { K { "decay", "DECAY", false }, K { "warmth", "WARMTH", false }, K { "dynamics", "DYNAMICS", true },
                     K { "spread", "SPREAD", false }, K { "drift", "DRIFT", false }, K { "layers", "LAYERS", false },
-                    K { "pingpong", "PING-PONG", false }, K { "mix", "MIX", false }, K { "output", "OUTPUT", false } })
+                    K { "pingpong", "PING-PONG", false }, K { "mix", "MIX", false }, K { "output", "OUTPUT", false },
+                    K { "tone", "TONE", true }, K { "depth", "DEPTH", false } })
         addAndMakeVisible (knobs.add (new Knob (p, k.id, k.title, k.bip)));
     knobs[2]->setTooltip (U ("Влево — память приглушается, пока играешь, и наплывает, когда перестаёшь. Вправо — тихие хвосты распускаются в ровный дрон."));
     knobs[3]->setTooltip (U ("Grains — разброс позиций гранул. Network и Tapes — сколько звука перетекает между линиями."));
     knobs[4]->setTooltip (U ("Глубина медленных непериодичных LFO: движение гранул и плавающая панорама линий."));
     knobs[5]->setTooltip (U ("Слои: каждый слой получает свою полосу частот, сдвиг высоты, текстуру и место в стерео. В петле слои ещё и темнеют или светлеют по-своему."));
     knobs[6]->setTooltip (U ("Пинг-понг: у каждого слоя своя задержка, эхо прыгает между левым и правым каналом."));
+    knobs[9]->setTooltip (U ("Тон мокрого сигнала: влево темнее и мягче, вправо ярче."));
+    knobs[10]->setTooltip (U ("Глубина: саб-слой на октаву ниже и подъём низа."));
 
     const auto modeC = Pal::mode (0);
     addAndMakeVisible (chips.add (new Chip (p, "lowcut", "LO-CUT", Chip::Cycle, modeC)));
@@ -531,8 +534,10 @@ void MemoriaEditor::resized()
     ring.setBounds (0, 100, W, 300);
 
     layerPanel.setBounds (W - 268, 156, 214, 4 * 48);
-    const int kw = 100, kx = (W - kw * knobs.size()) / 2;
-    for (int i = 0; i < knobs.size(); ++i) knobs[i]->setBounds (kx + i * kw, 416, kw, 100);
+    const int nb = 9, kw = 100, kx = (W - kw * nb) / 2;
+    for (int i = 0; i < nb; ++i) knobs[i]->setBounds (kx + i * kw, 416, kw, 100);
+    knobs[9]->setBounds (64, 196, 96, 96);     // TONE и DEPTH — слева от кольца
+    knobs[10]->setBounds (64, 296, 96, 96);
 
     const int cw = 98, cg = 6, cx = (W - cw * chips.size() - cg * (chips.size() - 1)) / 2;
     for (int i = 0; i < chips.size(); ++i) chips[i]->setBounds (cx + i * (cw + cg), 540, cw, 32);

@@ -1,19 +1,8 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "MemEngine.h"
+#include "Presets.h"
 
-namespace memoria
-{
-struct Preset
-{
-    const char* name;
-    int mode, size;
-    float decay, warmth, dynamics, spread, drift, mix;
-    int lowcut, highcut;
-    float layers; int seed; float pingpong; bool blur;
-};
-const std::vector<Preset>& presets();
-}
 
 class MemoriaProcessor : public juce::AudioProcessor
 {

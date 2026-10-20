@@ -54,6 +54,8 @@ struct Params
     int layerSeed = 0;     // 0 — базовый набор характеров, иначе случайный по номеру
     float pingpong = 0;    // 0..1: пинг-понг задержки на каждый слой
     bool blur = false;     // размыть всё в облако
+    float tone = .48f;     // 0 тёмный … .5 нейтрально … 1 яркий (наклон вокруг 900 Гц)
+    float depth = .4f;     // саб-слой на октаву ниже + подъём низа
 };
 
 // Характер слоя: полоса частот, сдвиг высоты, текстура
@@ -62,20 +64,26 @@ inline const char* bandName (int b) { static const char* n[4] = { "DARK", "MID",
 inline const char* texName (int t) { static const char* n[4] = { "CLEAN", "TAPE", "FOLD", "CRUSH" }; return n[std::clamp (t, 0, 3)]; }
 inline LayerChar layerChar (int seed, int k)
 {
-    static const LayerChar def[4] = { { 0, -12, 1 }, { 1, 0, 0 }, { 2, 7, 2 }, { 3, 12, 3 } };
+    static const LayerChar def[4] = { { 0, -12, 1 }, { 1, 0, 0 }, { 2, 12, 0 }, { 3, 7, 1 } };
     if (seed <= 0) return def[k & 3];
     Rng r ((uint32_t) seed * 2654435761u + 12345u);
     for (int i = 0; i < 4; ++i) r.next();
     int perm[4] = { 0, 1, 2, 3 };
     for (int i = 3; i > 0; --i) std::swap (perm[i], perm[r.next() % (uint32_t) (i + 1)]);   // полосы всегда разные
-    static const int P[10] = { 0, 0, 0, 12, -12, 7, 19, -5, 24, 5 };
+    // высота зависит от полосы: тёмный слой держит низ, вверх уходят только яркие
+    static const int PD[6] = { -12, -12, -24, 0, -5, -7 };
+    static const int PM[6] = { 0, 0, -5, 5, 7, -12 };
+    static const int PB[6] = { 0, 12, 12, 7, 19, 5 };
+    static const int PA[6] = { 12, 7, 0, 12, 19, 24 };
+    // текстуры: чаще чистая и лента, складка и крош — редкая приправа
+    static const int TX[8] = { 0, 0, 0, 1, 1, 1, 2, 3 };
     LayerChar c[4];
     for (int i = 0; i < 4; ++i)
     {
         c[i].band = perm[i];
-        c[i].semis = P[r.next() % 10u];
-        const int t = (int) (r.next() % 6u);
-        c[i].tex = t > 3 ? 0 : t;
+        const int* set = perm[i] == 0 ? PD : perm[i] == 1 ? PM : perm[i] == 2 ? PB : PA;
+        c[i].semis = set[r.next() % 6u];
+        c[i].tex = TX[r.next() % 8u];
     }
     return c[k & 3];
 }
@@ -280,9 +288,15 @@ public:
         for (int j = 0; j < 6; ++j) { blurAp[0][j].prepare ((int) (apMs[j] * .001 * sr)); blurAp[1][j].prepare ((int) (apMs[j] * 1.07 * .001 * sr)); }
         auto op = [this] (double fc) { return (float) (1.0 - std::exp (-2.0 * 3.141592653589793 * fc / sr)); };
         k.b700 = op (700); k.b150 = op (150); k.b2500 = op (2500); k.b1500 = op (1500); k.b4000 = op (4000);
-        k.t1500 = op (1500); k.t400 = op (400); k.t1000 = op (1000); k.pp = op (3500); k.tank = op (3000);
+        k.t1500 = op (1500); k.t400 = op (400); k.t1000 = op (1000); k.pp = op (2800); k.tank = op (2500);
+        k.b100 = op (100); k.b3000 = op (3000); k.b7000 = op (7000); k.b11000 = op (11000); k.up = op (5500);
+        k.sub = op (180); k.shelf = op (200); k.tilt = op (900); k.dc = op (8); k.dcOut = op (16);
+        dcOut[0] = dcOut[1] = 0;
+        k.limAtkOut = rate (.35, sr); k.limRelOut = (float) (1.0 - std::exp (-1.0 / (.25 * sr)));
+        subShift.prepare (sr);
+        subLp1 = subLp2 = 0; shelfLp[0] = shelfLp[1] = 0; tiltLp[0] = tiltLp[1] = 0; outGain = 1;
         k.blur = (float) (1.0 - std::exp (-1.0 / (.4 * sr)));
-        k.crushN = std::max (1, (int) std::lround (sr / 8000.0));
+        k.crushN = std::max (1, (int) std::lround (sr / 12000.0));
         bf = 0; blurPrev[0] = blurPrev[1] = 0; tankLp[0] = tankLp[1] = 0;
         for (auto& lb : lband) lb = LBand();
         resetStates();
@@ -348,6 +362,8 @@ public:
             sOut += (p.out - sOut) * k.smooth;
             sLay += (p.layers - sLay) * k.smooth;
             sPP += (p.pingpong - sPP) * k.smooth;
+            sTone += (p.tone - sTone) * k.smooth;
+            sDepth += (p.depth - sDepth) * k.smooth;
             bf += (bfT - bf) * k.blur;
             lcE += (lcT - lcE) * k.enRate;
             hcE += (hcT - hcE) * k.enRate;
@@ -407,13 +423,20 @@ public:
             float wl = 0, wr = 0;
             layerStage (wl, wr);
             blurStage (wl, wr);
-            wl *= 1.5f; wr *= 1.5f;   // подъём уровня мокрого сигнала
+            depthTone (wl, wr);
+            wl *= 2.0f; wr *= 2.0f;   // подъём уровня мокрого сигнала (выходной лимитер держит пики)
 
             float oL = wl * xf * sMix + dryL * (1 - sMix);
             float oR = wr * xf * sMix + dryR * (1 - sMix);
             if (p.mono) oL = oR = (oL + oR) * .5f;
-            oL = softClip (warm (oL, wd)) * sOut;
-            oR = softClip (warm (oR, wd)) * sOut;
+            oL = warm (oL, wd) * sOut;
+            oR = warm (oR, wd) * sOut;
+            // плавный лимитер: пики уменьшают громкость, а не искажаются
+            const float pk = std::max (std::fabs (oL), std::fabs (oR));
+            const float tgt = pk > .84f ? .84f / pk : 1.0f;
+            outGain += (tgt - outGain) * (tgt < outGain ? k.limAtkOut : k.limRelOut);
+            oL = softClip (oL * outGain);
+            oR = softClip (oR * outGain);
             outL[i] = oL;
             outR[i] = oR;
             outPk = std::max (outPk, std::max (std::fabs (oL), std::fabs (oR)));
@@ -437,10 +460,10 @@ public:
     } viz;
 
 private:
-    struct LBand { float s1 = 0, s2 = 0, held = 0; int hold = 0; };
+    struct LBand { float s1 = 0, s2 = 0, s3 = 0, held = 0; int hold = 0; };
     struct Deg
     {
-        float lp1 = 0, lp2 = 0, env = 0, bloom = 1, lp3 = 0;
+        float lp1 = 0, lp2 = 0, env = 0, bloom = 1, lp3 = 0, dc = 0;
         int band = -1;   // окраска линии внутри петли по характеру слоя
     };
 
@@ -473,8 +496,8 @@ private:
             switch (d.band)
             {
                 case 0: d.lp3 += (x - d.lp3) * k.t1500; x += la * .6f * (d.lp3 - x); break;
-                case 2: d.lp3 += (x - d.lp3) * k.t400;  x -= la * .5f * d.lp3; break;
-                case 3: d.lp3 += (x - d.lp3) * k.t1000; x -= la * .6f * d.lp3; break;
+                case 2: d.lp3 += (x - d.lp3) * k.t400;  x -= la * .25f * d.lp3; break;
+                case 3: d.lp3 += (x - d.lp3) * k.t1000; x -= la * .3f * d.lp3; break;
                 default: break;
             }
         }
@@ -490,6 +513,7 @@ private:
     // запись в линию: лимитер, тепло, мягкое вхождение при переходах
     void writeLine (int line, Deg& d, float v, float wd)
     {
+        d.dc += (v - d.dc) * k.dc; v -= d.dc;   // постоянная составляющая не копится в петле
         v = limitStep (v, d.env, k.limAtk, k.limRel);
         v = warm (v, wd);
         float& cell = at (line, w[line]);
@@ -560,7 +584,9 @@ private:
             const float prev = dOut[(s + 3) & 3] * fbStage;
             const float x = degrade (deg[s], prev, rg[c]) * duck[c];
             const float b = bloomGain (deg[s], g[c] + x, bloomAmt);
-            float v = limitStep (b * (x + g[c]), deg[s].env, k.limAtk, k.limRel);
+            float v = b * (x + g[c]);
+            deg[s].dc += (v - deg[s].dc) * k.dc; v -= deg[s].dc;
+            v = limitStep (v, deg[s].env, k.limAtk, k.limRel);
             v = warm (v, wd);
 
             const int ap = 2 * s, dl = 2 * s + 1;
@@ -640,10 +666,10 @@ private:
     {
         switch (band)
         {
-            case 0: b.s1 += (x - b.s1) * k.b700; return b.s1 * 1.15f;
-            case 1: { b.s1 += (x - b.s1) * k.b150; const float h = x - b.s1; b.s2 += (h - b.s2) * k.b2500; return b.s2 * 1.2f; }
-            case 2: b.s1 += (x - b.s1) * k.b1500; return (x - b.s1) * 1.6f;
-            default: b.s1 += (x - b.s1) * k.b4000; return (x - b.s1) * 2.3f;
+            case 0: b.s1 += (x - b.s1) * k.b700; return b.s1 * 1.1f;
+            case 1: { b.s1 += (x - b.s1) * k.b100; const float h = x - b.s1; b.s2 += (h - b.s2) * k.b3000; return b.s2 * .9f; }
+            case 2: { b.s1 += (x - b.s1) * k.b1500; const float h = x - b.s1; b.s2 += (h - b.s2) * k.b7000; return b.s2 * .95f; }
+            default: { b.s1 += (x - b.s1) * k.b4000; const float h = x - b.s1; b.s2 += (h - b.s2) * k.b11000; return b.s2 * 1.1f; }
         }
     }
     float texture (LBand& b, int tex, float x)
@@ -651,10 +677,10 @@ private:
         switch (tex)
         {
             case 1: return warm (x * 1.3f, .8f);
-            case 2: return std::sin (2.2f * x) * (1.3f / 2.2f);
+            case 2: return std::sin (1.7f * x) * (1.1f / 1.7f);
             case 3:
-                if (++b.hold >= k.crushN) { b.hold = 0; b.held = std::round (x * 40.0f) / 40.0f; }
-                return b.held;
+                if (++b.hold >= k.crushN) { b.hold = 0; b.held = std::round (x * 64.0f) / 64.0f; }
+                return .5f * (x + b.held);
             default: return x;
         }
     }
@@ -671,7 +697,12 @@ private:
             const float sh = shift[j].process (y, ratio[j]);
             if (la > 1e-4f)
             {
-                if (ch[j].semis != 0) y += la * (sh - y);
+                if (ch[j].semis != 0)
+                {
+                    float shv = sh;
+                    if (ch[j].semis > 0) { lband[j].s3 += (sh - lband[j].s3) * k.up; shv = lband[j].s3; }   // сдвиг вверх без жёсткого верха
+                    y += la * (shv - y);
+                }
                 y += la * (bandFilter (lband[j], ch[j].band, y) - y);
                 y += la * (texture (lband[j], ch[j].tex, y) - y);
             }
@@ -689,6 +720,26 @@ private:
                 wl += oL * pp * .9f; wr += oR * pp * .9f;
             }
         }
+    }
+
+    // DEPTH (саб на октаву ниже + подъём низа) и TONE (наклон вокруг 900 Гц)
+    void depthTone (float& wl, float& wr)
+    {
+        const float mono = .5f * (wl + wr);
+        const float sh = subShift.process (mono, .5f);
+        subLp1 += (sh - subLp1) * k.sub; subLp2 += (subLp1 - subLp2) * k.sub;
+        float x[2] = { wl, wr };
+        const float t = (.5f - sTone) * 2.0f;                 // +1 тёмный … −1 яркий
+        const float gLo = 1 + .45f * t, gHi = std::max (.2f, 1 - .55f * t);
+        for (int c = 0; c < 2; ++c)
+        {
+            shelfLp[c] += (x[c] - shelfLp[c]) * k.shelf;
+            x[c] += sDepth * .7f * shelfLp[c] + sDepth * 1.3f * subLp2;
+            tiltLp[c] += (x[c] - tiltLp[c]) * k.tilt;
+            x[c] = tiltLp[c] * gLo + (x[c] - tiltLp[c]) * gHi;
+        }
+        for (int c = 0; c < 2; ++c) { dcOut[c] += (x[c] - dcOut[c]) * k.dcOut; x[c] -= dcOut[c]; }
+        wl = x[0]; wr = x[1];
     }
 
     // BLUR: стерео-диффузор с хвостом, размывает всё в облако
@@ -773,6 +824,7 @@ private:
         float smooth = 0, fade = 0, recRate = 0, enRate = 0, limAtk = 0, limRel = 0, bloomDown = 0, bloomUp = 0;
         float envAtk = 0, envFastRel = 0, envSlowRel = 0, gateUp = 0, gateDown = 0, lfoScale = 1, walk = 0, modM0 = 0, modM1 = 0;
         float b700 = 0, b150 = 0, b2500 = 0, b1500 = 0, b4000 = 0, t1500 = 0, t400 = 0, t1000 = 0, pp = 0, tank = 0, blur = 0;
+        float b100 = 0, b3000 = 0, b7000 = 0, b11000 = 0, up = 0, sub = 0, shelf = 0, tilt = 0, limAtkOut = 0, limRelOut = 0, dc = 0, dcOut = 0;
         int crushN = 6;
     } k;
 
@@ -798,7 +850,9 @@ private:
     LBand lband[4];
     Allpass blurAp[2][6];
     float bf = 0, blurPrev[2] {}, tankLp[2] {};
-    float sLay = 0, sPP = 0;
+    float sLay = 0, sPP = 0, sTone = .48f, sDepth = .4f;
+    Shifter subShift;
+    float subLp1 = 0, subLp2 = 0, shelfLp[2] {}, tiltLp[2] {}, outGain = 1, dcOut[2] {};
 
     float sDecay = .6f, sWarm = .2f, sDyn = .5f, sSpread = .3f, sDrift = .4f, sMix = .5f, sOut = 1;
     float lcE = 0, hcE = 0, lcA = 0, lcG = 1, hcB = 1, hcG = 1, hcS = 0;
