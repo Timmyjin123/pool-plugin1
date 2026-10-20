@@ -43,6 +43,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout PoolProcessor::makeLayout()
         ps.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { s.id, 1 }, juce::String::fromUTF8 (s.name),
                                                                    juce::NormalisableRange<float> (0.f, 1.f), paramFromValue (s, s.def), attrs));
     }
+    ps.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "ovd", 1 }, juce::String::fromUTF8 ("Овердаб"), false));
     ps.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "scnon", 1 }, juce::String::fromUTF8 ("Сцены включены"), false));
     ps.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "freeze", 1 }, juce::String::fromUTF8 ("Заморозка"), false));
     return { ps.begin(), ps.end() };
@@ -78,7 +79,17 @@ void PoolProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 EngineParams PoolProcessor::makeParams (double dt, int)
 {
     const ParamSpec* S = paramSpecs();
-    const float amt = paramToValue (S[P_dr], getBase (P_dr)), spd = .15f + paramToValue (S[P_ds], getBase (P_ds)) * 2.5f;
+    // --- макро-ручки: смещения параметров вокруг центра (центр — без изменений)
+    const float mt = (getBase (P_mtex) - .5f) * 2, mm = (getBase (P_mmot) - .5f) * 2, ms = (getBase (P_mspc) - .5f) * 2, mb = (getBase (P_mbld) - .5f) * 2;
+    float offs[P_COUNT] {};
+    offs[P_size] += -.22f * mt; offs[P_dens] += .18f * mt; offs[P_drive] += .30f * mt; offs[P_crush] += .30f * mt;
+    offs[P_glitch] += .25f * mt; offs[P_pj] += .15f * mt; offs[P_nz] += .25f * mt;
+    offs[P_pj] += .25f * mm; offs[P_ps] += .25f * mm; offs[P_harm] += .15f * mm; offs[P_rev] += .25f * mm; offs[P_fbk] += .25f * mm;
+    offs[P_rvm] += .30f * ms; offs[P_rdec] += .25f * ms; offs[P_dm] += .25f * ms; offs[P_rshim] += .30f * ms;
+    offs[P_far] += .20f * ms; offs[P_fdist] += .20f * ms; offs[P_pad] += .15f * ms; offs[P_df] += .15f * ms;
+    offs[P_dw] += .50f * mb;
+    const float amt = clampf (paramToValue (S[P_dr], getBase (P_dr)) + .4f * mm, 0.f, 1.f);
+    const float spd = (.15f + paramToValue (S[P_ds], getBase (P_ds)) * 2.5f) * (1.0f + .8f * mm);
     // --- сцены: смешивание слотов A–D (ручное или автоэволюция)
     const bool scOn = isScenesOn();
     int sa = 0, sb = 0; float sf = 0;
@@ -102,7 +113,7 @@ EngineParams PoolProcessor::makeParams (double dt, int)
         }
     }
     else evoRun = false;
-    auto sceneExcluded = [] (int i) { return i == P_ipitch || i == P_ppitch || i == P_vol || i == P_dr || i == P_ds || i == P_scn || i == P_evo; };
+    auto sceneExcluded = [] (int i) { return i == P_ipitch || i == P_ppitch || i == P_vol || i == P_dr || i == P_ds || i == P_scn || i == P_evo || i >= P_mtex; };
     auto sceneStepped = [] (int i) { return i == P_pnote || i == P_gsnap; };
 
     float v[P_COUNT];
@@ -118,6 +129,7 @@ EngineParams PoolProcessor::makeParams (double dt, int)
             if (rng.uni() < dt * spd * .35) tg[i] = rng.bi();
             x = clampf (x + dr[i] * amt * .5f, 0.f, 1.f);
         }
+        x = clampf (x + offs[i], 0.f, 1.f);
         eff[(size_t) i].store (x);
         v[i] = paramToValue (S[i], x);
     }
@@ -134,7 +146,7 @@ EngineParams PoolProcessor::makeParams (double dt, int)
     e.pitch = v[P_pitch]; e.ps = v[P_ps]; e.harm = v[P_harm]; e.rev = v[P_rev]; e.wid = v[P_wid]; e.glitch = v[P_glitch];
     e.crush = v[P_crush]; e.freeze = isFrozen() || (scOn && scFrz[(size_t) (sf < .5f ? sa : sb)].load() > .5f);
     e.nz = v[P_nz]; e.nvoc = v[P_nvoc]; e.ncol = v[P_ncol]; e.nfol = v[P_nfol];
-    e.fbk = v[P_fbk]; e.rdec = v[P_rdec]; e.rsat = v[P_rsat]; e.rshim = v[P_rshim];
+    e.fbk = isOverdub() ? juce::jmax (v[P_fbk], .55f) : v[P_fbk]; e.rdec = v[P_rdec]; e.rsat = v[P_rsat]; e.rshim = v[P_rshim];
     if (scOn) eff[(size_t) P_scn].store (scnUi.load() / 3.0f);
     const float stab = v[P_pstab];
     e.ppos = clampf (v[P_pos] + (paramToValue (S[P_pos], getBase (P_pos)) - v[P_pos]) * stab, 0.f, 1.f);
@@ -158,6 +170,10 @@ void PoolProcessor::processBlock (juce::AudioBuffer<float>& b, juce::MidiBuffer&
 
     const float* l = nin > 0 ? b.getReadPointer (0) : nullptr;
     const float* r = nin > 1 ? b.getReadPointer (1) : l;
+    {
+        float s = 0; for (int i = 0; i < n; ++i) { const float a = l ? l[i] : 0.f; s += a * a; }
+        inLvl.store (std::sqrt (s / (float) juce::jmax (1, n)));
+    }
     for (int i = 0; i < n; ++i) { inL[(size_t) i] = l ? l[i] : 0.f; inR[(size_t) i] = r ? r[i] : inL[(size_t) i]; }
 
     const EngineParams P = makeParams ((double) n / sr, n);
@@ -239,7 +255,7 @@ void PoolProcessor::recallSceneToKnobs (int k)
 {
     setScenesOn (false);
     for (int i = 0; i < P_COUNT; ++i)
-        if (i != P_scn && i != P_evo && i != P_vol && i != P_dr && i != P_ds && i != P_ipitch && i != P_ppitch)
+        if (i < P_mtex && i != P_scn && i != P_evo && i != P_vol && i != P_dr && i != P_ds && i != P_ipitch && i != P_ppitch)
             setBaseNotify (i, sc[(size_t) k][(size_t) i].load());
     setFrozen (scFrz[(size_t) k].load() > .5f);
     curProgram = 0;
@@ -249,6 +265,31 @@ void PoolProcessor::playScene (int k)
 {
     setBaseNotify (P_scn, (float) k / 3.0f);
     setScenesOn (true);
+}
+
+void PoolProcessor::requestCapture()
+{
+    setFrozen (false);
+    engine.requestClear();
+}
+
+void PoolProcessor::setOverdub (bool b)
+{
+    if (auto* p = apvts.getParameter ("ovd")) p->setValueNotifyingHost (b ? 1.f : 0.f);
+}
+
+void PoolProcessor::toggleAB (int slot)
+{
+    if (slot == abCur) return;
+    for (int i = 0; i < P_COUNT; ++i) abData[abCur][i] = getBase (i);
+    abFrz[abCur] = isFrozen() ? 1.f : 0.f;
+    abValid[abCur] = true;
+    abCur = slot;
+    if (abValid[slot])
+    {
+        for (int i = 0; i < P_COUNT; ++i) setBaseNotify (i, abData[slot][i]);
+        setFrozen (abFrz[slot] > .5f);
+    }
 }
 
 void PoolProcessor::setScenesOn (bool b)

@@ -29,6 +29,8 @@ enum ParamId
     P_fbk, P_rdec, P_rsat, P_rshim, P_scn, P_evo,
     // Шумовое облако
     P_nz, P_nvoc, P_ncol, P_nfol,
+    // Макро-ручки главного экрана (центр = без изменений)
+    P_mtex, P_mmot, P_mspc, P_mbld,
     P_COUNT
 };
 
@@ -115,6 +117,10 @@ inline const ParamSpec* paramSpecs()
         { "nvoc", "Шум повторяет спектр звука (вокодер)", "Вокодер", 0, 1, false, "", false, .7f, 4 },
         { "ncol", "Цвет шума: тёмный → белый", "Цвет шума", 0, 1, false, "", false, .7f, 4 },
         { "nfol", "Шум следует за громкостью звука", "Следование", 0, 1, false, "", false, .6f, 4 },
+        { "mtex", "Макро: текстура", "Texture", 0, 1, false, "", true, .5f, 8 },
+        { "mmot", "Макро: движение", "Motion", 0, 1, false, "", true, .5f, 8 },
+        { "mspc", "Макро: пространство", "Space", 0, 1, false, "", true, .5f, 8 },
+        { "mbld", "Макро: баланс сухого и облака", "Blend", 0, 1, false, "", true, .5f, 8 },
     };
     return s;
 }

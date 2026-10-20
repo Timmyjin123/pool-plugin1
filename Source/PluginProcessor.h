@@ -52,6 +52,14 @@ public:
     void setScenesOn (bool b);
     float getScenePos() const { return scnUi.load(); }
 
+    // главный экран
+    void requestCapture();                    // очистить запись и снять заморозку: свежий материал
+    bool isOverdub() const { return apvts.getRawParameterValue ("ovd")->load() > .5f; }
+    void setOverdub (bool b);
+    void toggleAB (int slot);
+    int getAB() const { return abCur; }
+    float getInLevel() const { return inLvl.load(); }
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
@@ -75,6 +83,11 @@ private:
     double evoT = 0;
     bool evoRun = false;
     std::atomic<float> scnUi { 0 };
+    float abData[2][pool::P_COUNT] {};
+    float abFrz[2] {};
+    bool abValid[2] { false, false };
+    int abCur = 0;
+    std::atomic<float> inLvl { 0 };
     void initScenes();
 
     static constexpr int kScope = 4096;

@@ -149,6 +149,7 @@ public:
         rng = Rng (0xC0FFEE11u);
     }
 
+    void clear() { std::fill (buf.begin(), buf.end(), 0.0f); }
     const float* data() const { return buf.data(); }
     int length() const { return L; }
     int head() const { return w; }
@@ -937,6 +938,7 @@ public:
     }
 
     void setOffline (bool b) { spec.setOffline (b); }
+    void requestClear() { clearReq.store (true); }
     int underruns() const { return spec.underruns(); }
 
     void process (const float* inL, const float* inR, float* outL, float* outR, int n, const EngineParams& P)
@@ -980,6 +982,7 @@ private:
         GrainParams gp;
         gp.size = P.size; gp.dens = P.dens; gp.pos = P.pos; gp.pj = P.pj; gp.pitch = P.pitch; gp.ps = P.ps; gp.harm = P.harm;
         gp.rev = P.rev; gp.wid = P.wid; gp.glitch = P.glitch; gp.crush = P.crush; gp.freeze = P.freeze; gp.snap = P.gsnap;
+        if (clearReq.exchange (false)) grains.clear();
         float gin[kChunk];
         for (int i = 0; i < m; ++i)
         {
@@ -1092,6 +1095,7 @@ private:
     DelayLine dly[2];
     Reverb rev;
     NoiseCloud noise;
+    std::atomic<bool> clearReq { false };
     float gNz = 0;
     Biquad selfHp, selfLp;
     float fbOut[kChunk] {};
