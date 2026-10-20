@@ -175,5 +175,21 @@ int main()
         std::printf ("  shimmer @440: off=%.6f on=%.6f\n", eOff, eOn);
         CHECK (eOn > 3 * eOff, "шиммер добавляет октаву вверх в хвост");
     }
+
+    // авто-нота: тон 227 Гц подтягивается к ближайшему полутону (A#3 = 233.08 Гц)
+    {
+        Engine e9; e9.prepare (sr); e9.setOffline (true);
+        EngineParams Q; Q.dw = 1; Q.dens = 0.05f; Q.drive = 1; Q.rvm = 0; Q.dm = 0; Q.farLevel = 0; Q.pad = 1; Q.pdr = 0; Q.pdark = 12000; Q.pwarm = 0; Q.pnote = -1; Q.pstab = 1; Q.vol = .8f; Q.hp = 20; Q.lp = 18000;
+        std::vector<float> out; double p9 = 0;
+        for (int b = 0; b < (int) (sr * 12 / block); ++b)
+        {
+            for (int i = 0; i < block; ++i) { in[(size_t) i] = (float) (.4 * std::sin (p9)); p9 += kTwoPi * 227.0 / sr; }
+            e9.process (in.data(), nullptr, l.data(), r.data(), block, Q);
+            if (b > (int) (sr * 6 / block)) out.insert (out.end(), l.begin(), l.end());
+        }
+        const double aT = goertzel (out, 233.08, sr), aS = goertzel (out, 227.0, sr);
+        std::printf ("  auto note: @233.08=%.5f @227=%.5f\n", aT, aS);
+        CHECK (aT > 4 * aS, "авто-нота подтягивает тон к ближайшему полутону");
+    }
     return fails ? 1 : 0;
 }

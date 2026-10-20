@@ -30,6 +30,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout PoolProcessor::makeLayout()
                     static const char* nm[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
                     const int n = (int) std::lround (v);
                     if (n < 1) return juce::String::fromUTF8 ("выкл");
+                    if (n > 72) return juce::String::fromUTF8 ("авто");
                     const int m = n + 23;
                     return juce::String (nm[m % 12]) + juce::String (m / 12 - 1);
                 }
@@ -151,7 +152,8 @@ EngineParams PoolProcessor::makeParams (double dt, int)
     const float stab = v[P_pstab];
     e.ppos = clampf (v[P_pos] + (paramToValue (S[P_pos], getBase (P_pos)) - v[P_pos]) * stab, 0.f, 1.f);
     e.ppj = v[P_pj] * (1.0f - stab);
-    e.pnote = v[P_pnote] < .5f ? 0 : (int) std::lround (v[P_pnote]) + 23;
+    e.pnote = v[P_pnote] < .5f ? 0 : (v[P_pnote] > 72.5f ? -1 : (int) std::lround (v[P_pnote]) + 23);
+    e.pstab = stab; e.pfocus = v[P_pfocus];
     e.pstrict = v[P_pstrict];
     e.gsnap = (int) std::lround (v[P_gsnap]);
     e.pad = v[P_pad]; e.pdr = v[P_pdr]; e.pwid = v[P_pwid]; e.ppitch = v[P_ppitch]; e.pdark = v[P_pdark]; e.pwarm = v[P_pwarm];

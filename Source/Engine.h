@@ -359,7 +359,9 @@ struct SpecParams
 {
     float pos = .5f, pj = 0, pdr = 0, pwid = 1, ppitch = 0, freg = 12, fcl = 0;
     float strict = 0;           // строгость гармонического фильтра при заданной ноте
-    int note = 0;               // 0 — выкл, иначе MIDI-нота, к которой подтягивается основной тон
+    float focus = 0;            // 0..1: оставлять только самые сильные тона записи
+    float smooth = 0;           // 0..1: усреднение спектра во времени (стабильность пэда)
+    int note = 0;               // -1 авто (ближайший полутон), 0 — выкл, иначе MIDI-нота, к которой подтягивается основной тон
     bool doPad = false, doFar = false;
     int head = 0;
 };
@@ -378,7 +380,7 @@ public:
         stop();
         buf = buffer; L = length; sr = sampleRate;
         rng = Rng (seed);
-        re.assign (N, 0); im.assign (N, 0); mag.assign (H + 1, 0);
+        re.assign (N, 0); im.assign (N, 0); mag.assign (H + 1, 0); magAvg.clear(); autoMidi = -1; autoPend = 0; heldHz = 0; heldPend = 0;
         xlr.assign (H, 0); xli.assign (H, 0); xrr.assign (H, 0); xri.assign (H, 0);
         accL.assign (N, 0); accR.assign (N, 0); accFL.assign (N, 0); accFR.assign (N, 0);
         pwin.resize (N);
@@ -468,31 +470,57 @@ private:
         }
         fft.run (R, I, false);
         double mx = 1e-12;
+        const bool firstFrame = magAvg.empty();
+        if (firstFrame) magAvg.assign ((size_t) H + 1, 0.0);
+        const double alpha = firstFrame ? 1.0 : 1.0 - .92 * std::max (0.0, std::min (1.0, (double) P.smooth));
         for (int k = 0; k <= H; ++k)
         {
-            const double m = std::sqrt (R[k] * R[k] + I[k] * I[k]);
+            const double m0 = std::sqrt (R[k] * R[k] + I[k] * I[k]);
+            magAvg[(size_t) k] += (m0 - magAvg[(size_t) k]) * alpha;
+            const double m = magAvg[(size_t) k];
             mag[(size_t) k] = m;
             if (m > mx) mx = m;
         }
         const float* tc = TC.data(); const float* ts = TS.data();
 
-        // Фиксация ноты: находим сильнейший тон в 40..1500 Гц и подтягиваем его к выбранной ноте
+        // Фиксация ноты. Корнем выбирается сильный тон записи; он удерживается, пока другой тон
+        // не станет заметно сильнее надолго — иначе высота «гуляет» вслед за материалом.
         double lockR = 1.0, tgtHz = 0;
-        if (P.note > 0)
+        if (P.note != 0)
         {
-            const int k0 = std::max (2, (int) (40.0 * N / sr)), k1 = std::min (H - 3, (int) (1500.0 * N / sr));
-            double best = 0; int kb = -1;
-            for (int k = k0; k <= k1; ++k)
+            const int k0 = std::max (3, (int) (40.0 * N / sr)), k1 = std::min (H - 4, (int) (1500.0 * N / sr));
+            auto sum5 = [&] (int k) { return mag[(size_t) k - 2] + mag[(size_t) k - 1] + mag[(size_t) k] + mag[(size_t) k + 1] + mag[(size_t) k + 2]; };
+            auto refine = [&] (int k)
             {
-                const double m = mag[(size_t) k - 2] + mag[(size_t) k - 1] + mag[(size_t) k] + mag[(size_t) k + 1] + mag[(size_t) k + 2];
-                if (m > best) { best = m; kb = k; }
-            }
+                const double a = std::log (mag[(size_t) k - 1] + 1e-12), b = std::log (mag[(size_t) k] + 1e-12), c = std::log (mag[(size_t) k + 1] + 1e-12);
+                const double den = a - 2 * b + c, off = std::fabs (den) > 1e-9 ? .5 * (a - c) / den : 0.0;
+                return (k + std::max (-.5, std::min (.5, off))) * sr / N;
+            };
+            double best = 0; int kb = -1;
+            for (int k = k0; k <= k1; ++k) { const double m = sum5 (k); if (m > best) { best = m; kb = k; } }
             if (kb > 0 && best > 1e-9)
             {
-                const double a = std::log (mag[(size_t) kb - 1] + 1e-12), b = std::log (mag[(size_t) kb] + 1e-12), c = std::log (mag[(size_t) kb + 1] + 1e-12);
-                const double den = a - 2 * b + c, off = std::fabs (den) > 1e-9 ? .5 * (a - c) / den : 0.0;
-                const double hz = (kb + std::max (-.5, std::min (.5, off))) * sr / N;
-                const double target = 440.0 * std::pow (2.0, (P.note - 69) / 12.0);
+                if (heldHz <= 0) heldHz = refine (kb);
+                else
+                {
+                    const int kc = (int) std::lround (heldHz * N / sr), w = std::max (3, (int) (kc * .035));
+                    double sc = 0; int kcur = -1;
+                    for (int k = std::max (k0, kc - w); k <= std::min (k1, kc + w); ++k) { const double m = sum5 (k); if (m > sc) { sc = m; kcur = k; } }
+                    if (best > 1.5 * sc) { if (++heldPend >= 3) { heldHz = refine (kb); heldPend = 0; } }
+                    else { heldPend = 0; if (kcur > 0) heldHz += (refine (kcur) - heldHz) * .5; }
+                }
+            }
+            if (heldHz > 0)
+            {
+                const double hz = heldHz;
+                double target;
+                if (P.note > 0) target = 440.0 * std::pow (2.0, (P.note - 69) / 12.0);
+                else
+                {
+                    const double midiF = 69.0 + 12.0 * std::log2 (hz / 440.0);
+                    if (autoMidi < 0 || std::fabs (midiF - autoMidi) > .65) autoMidi = std::round (midiF);
+                    target = 440.0 * std::pow (2.0, (autoMidi - 69.0) / 12.0);
+                }
                 lockR = std::max (.125, std::min (8.0, target / hz));
                 tgtHz = target;
             }
@@ -515,7 +543,7 @@ private:
                 {
                     const double s = j / r; const int k = (int) s;
                     if (k >= H - 1) break;
-                    const double f = s - k, m = (mag[(size_t) k] * (1 - f) + mag[(size_t) k + 1] * f) * g * comb[(size_t) j];
+                    const double f = s - k, q0 = mag[(size_t) k] * (1 - f) + mag[(size_t) k + 1] * f, u0 = q0 / mx, m = q0 * ((1 - P.focus) + P.focus * u0 * u0 * u0) * g * comb[(size_t) j];
                     const int a = (j + oL) & 65535, b = (j + oR) & 65535;
                     const double ur = tc[a], ui = ts[a];
                     xlr[(size_t) j] += m * ur; xli[(size_t) j] += m * ui;
@@ -607,6 +635,8 @@ private:
     int L = 0;
     double sr = 48000;
     Rng rng;
+    std::vector<double> magAvg;
+    double autoMidi = -1, heldHz = 0; int autoPend = 0, heldPend = 0;
     std::vector<double> re, im, mag, xlr, xli, xrr, xri, accL, accR, accFL, accFR;
     std::vector<float> pwin, TC, TS, comb;
     Seg segA, segB;
@@ -894,6 +924,8 @@ struct EngineParams
     float ppos = .5f, ppj = .3f;   // позиция/разброс для пэда и далёкого голоса (стабильные)
     float fbk = 0, rdec = 4.8f, rsat = 0, rshim = 0;
     float nz = 0, nvoc = .7f, ncol = .7f, nfol = .6f;
+    float pstab = 0, pfocus = 0;
+    float gmix = 1;             // множитель громкости слоя зёрен (для тестов)
     int pnote = 0, gsnap = 0;
     float pstrict = .6f;
     float pad = .55f, pdr = .35f, pwid = .9f, ppitch = 0, pdark = 4500, pwarm = .25f;
@@ -991,10 +1023,11 @@ private:
             gin[i] = xi[i] + fb;
         }
         grains.process (gin, gL, gR, m, gp);
+        if (P.gmix != 1.0f) for (int i = 0; i < m; ++i) { gL[i] *= P.gmix; gR[i] *= P.gmix; }
         rev.setParams (P.rdec, P.rsat, P.rshim);
 
         SpecParams sp;
-        sp.pos = P.ppos; sp.pj = P.ppj; sp.note = P.pnote; sp.strict = P.pstrict; sp.pdr = P.pdr; sp.pwid = P.pwid; sp.ppitch = P.ppitch; sp.freg = P.freg; sp.fcl = P.fcl;
+        sp.pos = P.ppos; sp.pj = P.ppj; sp.note = P.pnote; sp.smooth = P.pstab; sp.focus = P.pfocus; sp.strict = P.pstrict; sp.pdr = P.pdr; sp.pwid = P.pwid; sp.ppitch = P.ppitch; sp.freg = P.freg; sp.fcl = P.fcl;
         sp.doPad = P.pad > .01f; sp.doFar = P.farLevel > .01f; sp.head = grains.head();
         const bool act = sp.doPad || sp.doFar;
         if (act)
