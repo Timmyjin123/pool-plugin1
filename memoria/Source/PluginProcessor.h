@@ -32,6 +32,11 @@ public:
     void setStateInformation (const void*, int) override;
 
     void erase() { engine.requestErase(); }
+    // VARY: какие параметры гуляют и их текущие (нормированные 0..1) значения
+    static constexpr int kVary = 9;
+    static const char* varyId (int i);
+    float varyEffective (int i) const { return varyEff[(size_t) i].load(); }
+    bool varyActive (int i) const { return std::fabs (varyOff[i]) > .004f; }
     void diceLayers();
     mem::Engine& getEngine() { return engine; }
 
@@ -42,6 +47,13 @@ private:
     float val (const char* id) const { return apvts.getRawParameterValue (id)->load(); }
 
     mem::Engine engine;
+    // VARY: плавные смещения выбранных параметров
+    float varyOff[kVary] {}, varyTgt[kVary] {};
+    double varyTimer = 0, sr = 48000;
+    juce::Random varyRnd;
+    std::array<std::atomic<float>, kVary> varyEff {};
+    void updateVary (int n);
+    float varied (int i, float base);
     int curProgram = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MemoriaProcessor)

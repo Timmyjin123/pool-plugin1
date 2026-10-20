@@ -50,12 +50,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout MemoriaProcessor::makeLayout
     f01 ("chaos", "Хаос: случайные сбои (warp, stutter, reverse, tape stop, dropout, shuffle)", 0);
     f01 ("ruin", "Руины: шипение, треск, эрозия памяти", 0);
     f01 ("space", "Зал: размер и громкость реверба", .3f);
+    ps.push_back (std::make_unique<AudioParameterBool> (ParameterID { "vary", 1 }, U ("Вариативность: параметры аккуратно гуляют"), false));
     ps.push_back (std::make_unique<AudioParameterBool> (ParameterID { "shimmer", 1 }, U ("Шиммер: хвост поднимается на октаву"), false));
     {
         auto hz = AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
             { return v >= 1000 ? String (v / 1000.0f, 1) + U (" кГц") : String (roundToInt (v)) + U (" Гц"); });
-        NormalisableRange<float> lo (20, 2000); lo.setSkewForCentre (200);
-        NormalisableRange<float> hi (500, 20000); hi.setSkewForCentre (3200);
+        NormalisableRange<float> lo (15, 4000); lo.setSkewForCentre (200);
+        NormalisableRange<float> hi (300, 20000); hi.setSkewForCentre (3000);
         ps.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "tailLo", 1 }, U ("Хвосты: срез низа"), lo, 40, hz));
         ps.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "tailHi", 1 }, U ("Хвосты: срез верха"), hi, 16000, hz));
     }
@@ -80,6 +81,7 @@ bool MemoriaProcessor::isBusesLayoutSupported (const BusesLayout& l) const
 
 void MemoriaProcessor::prepareToPlay (double sampleRate, int)
 {
+    sr = sampleRate;
     engine.prepare (sampleRate);
     setLatencySamples (0);
 }
@@ -92,14 +94,15 @@ void MemoriaProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBu
     for (int c = nIn; c < buf.getNumChannels(); ++c) buf.clear (c, 0, n);
     if (n == 0) return;
 
+    updateVary (n);
     mem::Params p;
     p.mode = (int) val ("mode");
     p.size = (int) val ("size");
     p.decay = val ("decay");
-    p.warmth = val ("warmth");
-    p.dynamics = val ("dynamics");
-    p.spread = val ("spread");
-    p.drift = val ("drift");
+    p.warmth = varied (6, val ("warmth"));
+    p.dynamics = varied (7, val ("dynamics"));
+    p.spread = varied (0, val ("spread"));
+    p.drift = varied (1, val ("drift"));
     p.mix = val ("mix");
     p.out = juce::Decibels::decibelsToGain (val ("output"));
     p.lowcut = (int) val ("lowcut");
@@ -108,16 +111,16 @@ void MemoriaProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBu
     p.freeze = val ("freeze") > .5f;
     p.reverse = val ("reverse") > .5f;
     p.mono = val ("mono") > .5f;
-    p.layers = val ("layers");
+    p.layers = varied (2, val ("layers"));
     p.layerSeed = (int) val ("layerSeed");
-    p.pingpong = val ("pingpong");
+    p.pingpong = varied (3, val ("pingpong"));
     p.blur = val ("blur") > .5f;
-    p.tone = val ("tone");
-    p.depth = val ("depth");
+    p.tone = varied (5, val ("tone"));
+    p.depth = varied (8, val ("depth"));
     p.chaos = val ("chaos");
     p.ruin = val ("ruin");
     p.harmony = (int) val ("harmony");
-    p.space = val ("space");
+    p.space = varied (4, val ("space"));
     p.shimmer = val ("shimmer") > .5f ? .6f : 0.0f;
     p.tailLo = val ("tailLo");
     p.tailHi = val ("tailHi");
@@ -128,6 +131,55 @@ void MemoriaProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBu
     const float* inR = nIn > 1 ? buf.getReadPointer (1) : nullptr;
     // движок читает вход до записи выхода в тот же индекс, поэтому обработка на месте безопасна
     engine.process (inL, inR, l, r, n, p);
+}
+
+// ---------------------------------------------------------------- VARY
+const char* MemoriaProcessor::varyId (int i)
+{
+    static const char* ids[kVary] = { "spread", "drift", "layers", "pingpong", "space", "tone", "warmth", "dynamics", "depth" };
+    return ids[juce::jlimit (0, kVary - 1, i)];
+}
+
+// Раз в 8–16 с выбираются 2–3 параметра, их смещения плавно уходят к новым небольшим целям;
+// остальные плавно возвращаются к своим значениям. Режим, размер, DECAY, MIX, OUTPUT не трогаются.
+void MemoriaProcessor::updateVary (int n)
+{
+    static const float range[kVary] = { .20f, .25f, .25f, .20f, .15f, .08f, .12f, .12f, .10f };
+    const bool on = val ("vary") > .5f;
+    const double dt = (double) n / sr;
+    if (on)
+    {
+        varyTimer -= dt;
+        if (varyTimer <= 0)
+        {
+            varyTimer = 8.0 + 8.0 * varyRnd.nextDouble();
+            for (auto& t : varyTgt) t = 0;
+            const int count = 2 + varyRnd.nextInt (2);
+            for (int c = 0; c < count; ++c)
+            {
+                const int i = varyRnd.nextInt (kVary);
+                varyTgt[i] = (varyRnd.nextFloat() * 2 - 1) * range[i];
+            }
+        }
+    }
+    else
+    {
+        for (auto& t : varyTgt) t = 0;
+        varyTimer = 0;
+    }
+    const float a = (float) (1.0 - std::exp (-dt / 4.0));   // переход ~4 с
+    for (int i = 0; i < kVary; ++i) varyOff[i] += (varyTgt[i] - varyOff[i]) * a;
+}
+
+float MemoriaProcessor::varied (int i, float base)
+{
+    auto* par = apvts.getParameter (varyId (i));
+    float norm = par->convertTo0to1 (base) + varyOff[i];
+    // DYNAMICS не перескакивает через середину: «наплыв» и «расцвет» — разные характеры
+    if (i == 7) { const float b0 = par->convertTo0to1 (base); norm = b0 < .5f ? std::min (norm, .49f) : std::max (norm, .51f); if (std::fabs (b0 - .5f) < .02f) norm = b0; }
+    norm = juce::jlimit (0.0f, 1.0f, norm);
+    varyEff[(size_t) i].store (norm);
+    return par->convertFrom0to1 (norm);
 }
 
 void MemoriaProcessor::setCurrentProgram (int i)

@@ -60,6 +60,14 @@ void Look::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, floa
                 c.getCentreX() + std::sin (ang) * pr * .85f, c.getCentreY() - std::cos (ang) * pr * .85f, 2.2f);
     g.setColour (col.withAlpha (.25f));
     g.fillEllipse (juce::Rectangle<float> (7, 7).withCentre ({ c.getCentreX() + std::sin (ang) * (r + 5), c.getCentreY() - std::cos (ang) * (r + 5) }));
+    // VARY: текущее значение гуляющего параметра
+    const float eff = (float) (double) s.getProperties().getWithDefault ("eff", -1.0);
+    if (eff >= 0 && std::fabs (eff - pos) > .003f)
+    {
+        const float ea = a0 + eff * (a1 - a0);
+        g.setColour (Pal::layer (0, 3));
+        g.fillEllipse (juce::Rectangle<float> (6, 6).withCentre ({ c.getCentreX() + std::sin (ea) * (r + 6), c.getCentreY() - std::cos (ea) * (r + 6) }));
+    }
 }
 
 void Look::drawComboBox (juce::Graphics& g, int w, int h, bool, int, int, int, int, juce::ComboBox&)
@@ -71,7 +79,7 @@ void Look::drawComboBox (juce::Graphics& g, int w, int h, bool, int, int, int, i
 }
 
 // ============================================================ Knob
-Knob::Knob (MemoriaProcessor& p, const char* id, const juce::String& t, bool bipolar) : title (t)
+Knob::Knob (MemoriaProcessor& p, const char* id, const juce::String& t, bool bipolar) : title (t), pid (id)
 {
     par = p.apvts.getParameter (id);
     slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
@@ -526,7 +534,7 @@ MemoriaEditor::MemoriaEditor (MemoriaProcessor& p)
     addAndMakeVisible (chips.add (new Chip (p, "reverse", "REVERSE", Chip::Toggle, modeC)));
     addAndMakeVisible (chips.add (new Chip (p, "blur", "BLUR", Chip::Toggle, Pal::blur())));
     addAndMakeVisible (chips.add (new Chip (p, "shimmer", "SHIMMER", Chip::Toggle, Pal::ice())));
-    addAndMakeVisible (chips.add (new Chip (p, "mono", "MONO", Chip::Toggle, modeC)));
+    addAndMakeVisible (chips.add (new Chip (p, "vary", "VARY", Chip::Toggle, Pal::layer (0, 3))));
     addAndMakeVisible (chips.add (new Chip ("ERASE", [this] { proc.erase(); }, Pal::warn())));
     chips[0]->setTooltip (U ("Срез низа в петле: каждый круг память становится тоньше (3 степени)"));
     chips[1]->setTooltip (U ("Срез верха с тёплой сатурацией в петле: каждый круг память темнеет (3 степени)"));
@@ -534,6 +542,7 @@ MemoriaEditor::MemoriaEditor (MemoriaProcessor& p)
     chips[5]->setTooltip (U ("Размыть всё в облако. Размытое понемногу дописывается в память, и дрон со временем становится мягче."));
     chips[6]->setTooltip (U ("Шиммер: хвост зала поднимается на октаву (в 5TH — на квинту) и каскадом уходит вверх. Работает вместе с SPACE."));
     addAndMakeVisible (tailRange);
+    chips[7]->setTooltip (U ("Вариативность: раз в 8–16 секунд 2–3 параметра (SPREAD, DRIFT, LAYERS, PING-PONG, SPACE, TONE, WARMTH, DYNAMICS, DEPTH) плавно и понемногу уходят в сторону. Точка на ручке — её текущее значение."));
     chips[8]->setTooltip (U ("Стереть всю память"));
     addAndMakeVisible (layerPanel);
     layerPanel.setTooltip (U ("Характеры слоёв. Клик — перетасовать."));
@@ -544,7 +553,7 @@ MemoriaEditor::MemoriaEditor (MemoriaProcessor& p)
     addAndMakeVisible (presetBox);
 
     setSize (960, 600);
-    startTimerHz (10);
+    startTimerHz (20);
     timerCallback();
 }
 
@@ -560,9 +569,14 @@ void MemoriaEditor::timerCallback()
         for (auto* k : knobs) k->setAccent (c);
         sizeSeg.setAccent (c);
         harmSeg.setAccent (c);
-        for (int i : { 0, 1, 2, 4, 7 }) chips[i]->setAccent (c);
+        for (int i : { 0, 1, 2, 4 }) chips[i]->setAccent (c);
         repaint();
     }
+    // VARY: точки на ручках, которые сейчас гуляют
+    for (int i = 0; i < MemoriaProcessor::kVary; ++i)
+        for (auto* k : knobs)
+            if (k->paramId() == MemoriaProcessor::varyId (i))
+                k->setEffective (proc.varyActive (i) ? proc.varyEffective (i) : -1.0f);
     const int pr = proc.getCurrentProgram();
     if (presetBox.getSelectedId() != pr) presetBox.setSelectedId (pr, juce::dontSendNotification);
 }
@@ -576,7 +590,7 @@ void MemoriaEditor::paint (juce::Graphics& g)
     g.drawText ("MEMORIA", 28, 12, 220, 28, juce::Justification::centredLeft);
     g.setColour (Pal::dim());
     g.setFont (F (11, false, .2f));
-    g.drawText ("drifting memory station", 30, 38, 240, 14, juce::Justification::centredLeft);
+    g.drawText ("afterimage engine", 30, 38, 240, 14, juce::Justification::centredLeft);
     g.setColour (acc);
     g.fillEllipse (14, 22, 7, 7);
 
@@ -652,8 +666,8 @@ void LayerPanel::paint (juce::Graphics& g)
 }
 
 // ============================================================ TailRange
-static float hzToX (float hz, float w) { return std::log (hz / 20.0f) / std::log (1000.0f) * w; }
-static float xToHz (float x, float w) { return 20.0f * std::pow (1000.0f, juce::jlimit (0.0f, 1.0f, x / w)); }
+static float hzToX (float hz, float w) { return std::log (hz / 15.0f) / std::log (20000.0f / 15.0f) * w; }
+static float xToHz (float x, float w) { return 15.0f * std::pow (20000.0f / 15.0f, juce::jlimit (0.0f, 1.0f, x / w)); }
 
 TailRange::TailRange (MemoriaProcessor& p) : proc (p)
 {
@@ -680,8 +694,8 @@ void TailRange::mouseDrag (const juce::MouseEvent& e)
 {
     const auto b = bar();
     float hz = xToHz ((float) e.x - b.getX(), b.getWidth());
-    if (dragLo) attLo->setValueAsPartOfGesture (juce::jlimit (20.0f, 2000.0f, hz));
-    else attHi->setValueAsPartOfGesture (juce::jlimit (500.0f, 20000.0f, hz));
+    if (dragLo) attLo->setValueAsPartOfGesture (juce::jlimit (15.0f, 4000.0f, hz));
+    else attHi->setValueAsPartOfGesture (juce::jlimit (300.0f, 20000.0f, hz));
 }
 void TailRange::mouseUp (const juce::MouseEvent&) { (dragLo ? attLo : attHi)->endGesture(); }
 void TailRange::mouseDoubleClick (const juce::MouseEvent&)
@@ -702,7 +716,7 @@ void TailRange::paint (juce::Graphics& g)
     g.setColour (Pal::dim()); g.setFont (F (11, true, .14f));
     g.drawText ("TAIL", getLocalBounds().removeFromTop (16).withTrimmedLeft (6), juce::Justification::centredLeft);
     g.setColour (Pal::text().withAlpha (.8f)); g.setFont (F (11));
-    g.drawText ((flo <= 20.5f ? juce::String ("20") : fmt (flo)) + U (" Гц – ") + (fhi >= 19500 ? juce::String ("20k") : fmt (fhi)),
+    g.drawText ((flo <= 15.5f ? juce::String ("15") : fmt (flo)) + U (" Гц – ") + (fhi >= 19500 ? juce::String ("20k") : fmt (fhi)),
                 getLocalBounds().removeFromTop (16).withTrimmedRight (6), juce::Justification::centredRight);
 
     g.setColour (Pal::panel()); g.fillRoundedRectangle (b, 6);

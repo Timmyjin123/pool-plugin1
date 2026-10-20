@@ -47,9 +47,11 @@ public:
     void resized() override;
     void paint (juce::Graphics&) override;
     void setAccent (juce::Colour c) { slider.getProperties().set ("col", (int) c.getARGB()); repaint(); }
+    void setEffective (float e) { if (std::fabs ((float) (double) slider.getProperties().getWithDefault ("eff", -1.0) - e) > 1e-4f) { slider.getProperties().set ("eff", e); slider.repaint(); } }
+    const juce::String& paramId() const { return pid; }
 private:
     juce::Slider slider;
-    juce::String title;
+    juce::String title, pid;
     juce::RangedAudioParameter* par;
     std::unique_ptr<juce::SliderParameterAttachment> att;
 };

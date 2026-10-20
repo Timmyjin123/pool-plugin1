@@ -40,7 +40,7 @@ int main (int argc, char** argv)
         {
             if (freeze) set ("freeze", 1);
             if (reverse) set ("reverse", 1);
-            if (blur) { set ("blur", 1); set ("layers", 1); set ("pingpong", .7f); set ("chaos", 1); set ("ruin", .8f); }
+            if (blur) { set ("blur", 1); set ("layers", 1); set ("pingpong", .7f); set ("chaos", .3f); set ("ruin", .2f); set ("vary", 1); set ("space", .7f); }
         }
         p.processBlock (buf, midi);
     }

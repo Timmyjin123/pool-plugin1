@@ -1,5 +1,6 @@
 #pragma once
-// Memoria — «станция дрейфующей памяти». Движок без зависимостей от JUCE.
+// Memoria — afterimage engine: звук оставляет послеобраз, который слоится, темнеет и распадается.
+// Движок без зависимостей от JUCE.
 //
 // Идея: одна общая память (пул сэмплов), на которой режим раскладывает свои кольцевые линии.
 // Каждый проход по петле сигнал проходит цепочку деградации (срез низа, срез верха с чётной
@@ -64,6 +65,7 @@ struct Params
     float prism = -1;      // переливы спектра; −1 — берётся из DRIFT (так в плагине)
     float tailLo = 40;     // фильтр хвостов: срез низа, Гц
     float tailHi = 16000;  // фильтр хвостов: срез верха, Гц
+    float clarity = -1;    // автокоррекция середины и мягкие атаки; −1 — автоматически (от SPACE)
 };
 
 inline const char* chaosName (int t)
@@ -318,7 +320,8 @@ struct Reverb
     std::vector<float> pre[2]; int preCap = 1, preW = 0;
     Allpass diff[2][4];
     Shifter shim;
-    float shimLp = 0, shimFb = 0;
+    float shimLp = 0, shimFb = 0, shimPre1 = 0, shimPre2 = 0, shimLp2 = 0, aShimPre = 0;
+    float envG = 0, guard = 1, aGuardAtk = 0, aGuardRel = 0;
     double sr = 48000;
     float aDamp = 0, aLow = 0, aShim = 0, modDepth = 0;
     float lastRt = -1, lastSize = -1;
@@ -345,7 +348,10 @@ struct Reverb
         shim.prepare (sr);
         shimLp = shimFb = 0;
         auto op = [this] (double fc) { return (float) (1.0 - std::exp (-2.0 * 3.14159265358979 * fc / sr)); };
-        aLow = op (250); aShim = op (6500);
+        aLow = op (250); aShim = op (7000); aShimPre = op (4500);
+        aGuardAtk = (float) (1.0 - std::exp (-1.0 / (.002 * sr))); aGuardRel = (float) (1.0 - std::exp (-1.0 / (.6 * sr)));
+        envG = 0; guard = 1;
+        shimPre1 = shimPre2 = shimLp2 = 0;
         modDepth = (float) (.0006 * sr);
         lastRt = lastSize = -1;
     }
@@ -393,11 +399,20 @@ struct Reverb
         if (shimmer > 1e-4f)
         {
             float sum = 0; for (int i = 0; i < NL; ++i) sum += v[i];
-            const float up = shim.process (sum * .25f, shimRatio);
-            shimLp += (up - shimLp) * aShim;
-            sh = shimLp * shimmer * .55f;
+            // до сдвига — только ниже ~4.5 кГц (2 полюса), после — ещё 2 полюса: каскад не уходит к пределу слышимого
+            shimPre1 += (sum * .25f - shimPre1) * aShimPre; shimPre2 += (shimPre1 - shimPre2) * aShimPre;
+            const float up = shim.process (shimPre2, shimRatio);
+            shimLp += (up - shimLp) * aShim; shimLp2 += (shimLp - shimLp2) * aShim;
+            sh = shimLp2 * shimmer * .32f;
         }
         // матрица Адамара 8×8 (без потерь энергии)
+        // страховка от самовозбуждения: если энергия в линиях растёт выше нормы, обратная связь плавно слабеет
+        float en = 0; for (int i = 0; i < NL; ++i) en += v[i] * v[i];
+        en *= 1.0f / NL;
+        envG += (en - envG) * (en > envG ? aGuardAtk : aGuardRel);
+        const float gT = envG > .25f ? std::sqrt (.25f / envG) : 1.0f;
+        guard += (gT - guard) * (gT < guard ? aGuardAtk : aGuardRel);
+        const float shimDecay = 1.0f - .1f * shimmer;   // шиммер чуть укорачивает хвост: каскад не копится
         float h[NL];
         for (int i = 0; i < NL; ++i) h[i] = v[i];
         for (int len2 = 1; len2 < NL; len2 <<= 1)
@@ -409,7 +424,7 @@ struct Reverb
             float y = h[i] * nrm;
             lpL[i] += (y - lpL[i]) * aLow;                         // низ
             lpD[i] += (y - lpD[i]) * aDamp;                        // верх гаснет быстрее
-            y = (lpD[i] - lpL[i]) * g[i] + lpL[i] * gLow[i];
+            y = ((lpD[i] - lpL[i]) * g[i] + lpL[i] * gLow[i]) * guard * shimDecay;
             y += (i & 1 ? x[1] : x[0]) * .5f + sh * (i < 4 ? 1.0f : -1.0f) * .5f;
             if (y > 1.5f) y = 1.5f + std::tanh (y - 1.5f); else if (y < -1.5f) y = -1.5f + std::tanh (y + 1.5f);   // предохранитель
             line[i][(size_t) w[i]] = y;
@@ -617,6 +632,14 @@ public:
         subShift.prepare (sr, .10, .026, .012);     // бас: длинное окно, поиск фазы до ~38 Гц
         subShift2.prepare (sr, .12, .030, .014);
         k.bass = op (400); k.sub2 = op (90); k.monoLo = op (120);
+        k.cl300 = op (300); k.cl3000 = op (3000);
+        auto tc = [this] (double sec) { return (float) (1.0 - std::exp (-1.0 / (sec * sr))); };
+        k.clEnv = tc (.05); k.clAtk = tc (.02); k.clRel = tc (.3);
+        k.trFast = tc (.001); k.trSlow = tc (.04); k.trAtk = tc (.0005); k.trRel = tc (.03);
+        k.playRate = tc (1.2);
+        k.chFade = tc (.008);
+        k.agcEnv = tc (2.0); k.agcDown = tc (1.5); k.agcUp = tc (3.0);
+        agcEnv = 0; agcG = 1; chFade = 1; chPending = false;
         k.envAtkS = (float) (1.0 - std::exp (-1.0 / (.004 * sr))); k.envRelS = (float) (1.0 - std::exp (-1.0 / (.25 * sr)));
         k.envSlowS = (float) (1.0 - std::exp (-1.0 / (1.5 * sr)));
         bassLp[0] = bassLp[1] = 0; sub2Lp[0] = sub2Lp[1] = 0; monoLp[0] = monoLp[1] = 0; subEnv = subEnvSlow = 0;
@@ -657,13 +680,17 @@ public:
         if (curMode < 0) { rg[0] = rgT[0]; rg[1] = rgT[1]; }
         for (int j = 0; j < 4; ++j)
         {
-            ch[j] = layerChar (chaosSt.seedOffset ? (p.layerSeed + chaosSt.seedOffset) % 1000 + 1 : p.layerSeed, j, p.harmony);
+            // новый характер слоя не включается мгновенно: слои уходят в ноль (~30 мс), меняются и возвращаются
+            const LayerChar nc = layerChar (chaosSt.seedOffset ? (p.layerSeed + chaosSt.seedOffset) % 1000 + 1 : p.layerSeed, j, p.harmony);
+            if (nc.band != ch[j].band || nc.semis != ch[j].semis || nc.tex != ch[j].tex) { pendingCh[j] = nc; chPending = true; }
+            if (chFade <= .01f && chPending) { ch[j] = pendingCh[j]; }
             deg[j].band = ch[j].band;
             ratio[j] = std::pow (2.0f, (float) ch[j].semis / 12.0f);
             static const float ppT[4] = { .31f, .47f, .67f, .89f };
             const float sc = curSize == 2 ? .55f : (curSize == 1 ? .8f : 1.0f);
             pong[j].len = std::min (pong[j].cap - 1, std::max (16, (int) (ppT[j] * sc * sr)));
         }
+        if (chFade <= .01f && chPending) chPending = false;
         if (curMode == 0) deg[0].band = -1;   // у гранул одна петля: окраска слоёв только на выходе
         const float bfT = p.blur ? 1.0f : 0.0f;
         {
@@ -675,11 +702,12 @@ public:
             preDelay = (float) ((.015 + .06 * sp) * sr);
             shimRatio = p.harmony == 1 ? 1.4983071f : 2.0f;   // квинта в 5TH, иначе октава
             auto op = [this] (double fc) { return (float) (1.0 - std::exp (-2.0 * 3.14159265358979 * std::min (fc, sr * .45) / sr)); };
-            tLoA = op (std::clamp (p.tailLo, 20.0f, 2000.0f));
-            tHiA = op (std::clamp (p.tailHi, 500.0f, 20000.0f));
-            if (p.tailHi >= 19500.0f) tHiA = 1.0f;   // крайнее правое — фильтр верха выключен
-            if (p.tailLo <= 20.5f) tLoA = 0.0f;      // крайнее левое — фильтр низа выключен
-            if (curMode < 0) { sTLo = tLoA; sTHi = tHiA; }
+            tailLoBase = std::clamp (p.tailLo, 15.0f, 4000.0f);
+            tailHiBase = std::clamp (p.tailHi, 300.0f, 20000.0f);
+            tailLoOff = p.tailLo <= 15.5f;          // крайнее левое — срез низа выключен
+            tailHiOff = p.tailHi >= 19500.0f;       // крайнее правое — срез верха выключен (но хвост всё равно мягко темнеет)
+            clarityT = p.clarity >= 0 ? p.clarity : -1.0f;
+            (void) op;
         }
         float inPk = 0, outPk = 0;
         for (int i = 0; i < n; ++i)
@@ -707,6 +735,7 @@ public:
             sDrift += (p.drift - sDrift) * k.smooth;
             sMix += (p.mix - sMix) * k.smooth;
             sOut += (p.out - sOut) * k.smooth;
+            chFade += ((chPending ? 0.0f : 1.0f) - chFade) * k.chFade;
             sLay += (p.layers - sLay) * k.smooth;
             sPP += (p.pingpong - sPP) * k.smooth;
             sTone += (p.tone - sTone) * k.smooth;
@@ -717,14 +746,31 @@ public:
             sShim += (p.shimmer - sShim) * k.smooth;
             const float prT = p.prism >= 0 ? p.prism : std::max (0.0f, p.drift - .25f) * .8f;   // DRIFT двигает и спектр
             sPrism += (prT - sPrism) * k.smooth;
-            sTLo += (tLoA - sTLo) * k.smooth;
-            sTHi += (tHiA - sTHi) * k.smooth;
+            // TAIL под капотом: срезы гуляют с DRIFT, а без игры хвост постепенно темнеет и истончается
+            {
+                const float pf = std::min (1.0f, std::max (envS[0], envS[1]) * 6.0f);
+                playF += (pf - playF) * k.playRate;
+                if (--tailCnt <= 0)
+                {
+                    tailCnt = 16;
+                    const float wander = sDrift * .35f * (lfo[2].v * 2 - 1);
+                    const float natural = (.4f + .6f * sSpace) * (1 - playF);
+                    const float fLo = tailLoOff ? 0.0f : tailLoBase * std::pow (2.0f, wander + .4f * natural);
+                    const float fHi = (tailHiOff ? 20000.0f : tailHiBase) * std::pow (2.0f, -wander * .7f - .9f * natural);
+                    auto op1 = [this] (float fc) { return (float) (1.0 - std::exp (-2.0 * 3.14159265358979 * std::min ((double) fc, sr * .45) / sr)); };
+                    tLoA = fLo <= 0 ? 0.0f : op1 (fLo);
+                    tHiA = (tailHiOff && natural < .02f) ? 1.0f : op1 (std::min (fHi, 20000.0f));
+                }
+                sTLo += (tLoA - sTLo) * k.smooth * 4;
+                sTHi += (tHiA - sTHi) * k.smooth * 4;
+            }
             bf += (bfT - bf) * k.blur;
             lcE += (lcT - lcE) * k.enRate;
             hcE += (hcT - hcE) * k.enRate;
             for (int c = 0; c < 2; ++c) rg[c] += (rgT[c] - rg[c]) * k.recRate;
 
-            const float dg = (2.0f - sDecay) * sDecay * 1.066f;            // кривая обратной связи
+            // кривая обратной связи; не выше 0.995 — петля не раскачивается сама (бесконечно держит только FREEZE)
+            const float dg = std::min (.995f, (2.0f - sDecay) * sDecay * 1.066f);
             const float wd = sWarm * sWarm * sWarm;
             const float duckAmt = sDyn < .5f ? (.5f - sDyn) * 2 * (.5f - sDyn) * 2 : 0.0f;
             const float bloomAmt = sDyn > .5f ? (sDyn - .5f) * 2 * (sDyn - .5f) * 2 : 0.0f;
@@ -811,20 +857,30 @@ public:
                 revLvl += (std::fabs (rl) + std::fabs (rr) - revLvl) * .0005f;
             }
             if (sPrism > 1e-4f) prism.process (wl, wr, sPrism, sDrift);
+            clarity (wl, wr);
             depthTone (wl, wr, .5f * (dryL + dryR));
-            // TAIL: фильтр хвостов (12 дБ/окт снизу и сверху)
+            // TAIL: фильтр хвостов, 24 дБ/окт снизу и сверху
             {
                 float x[2] = { wl, wr };
                 for (int c = 0; c < 2; ++c)
                 {
-                    tf[c][0] += (x[c] - tf[c][0]) * sTLo; float h = x[c] - tf[c][0];
-                    tf[c][1] += (h - tf[c][1]) * sTLo; h -= tf[c][1];
-                    tf[c][2] += (h - tf[c][2]) * sTHi; tf[c][3] += (tf[c][2] - tf[c][3]) * sTHi;
-                    x[c] = tf[c][3];
+                    float h = x[c];
+                    for (int j = 0; j < 4; ++j) { tf[c][j] += (h - tf[c][j]) * sTLo; h -= tf[c][j]; }
+                    for (int j = 4; j < 8; ++j) { tf[c][j] += (h - tf[c][j]) * sTHi; h = tf[c][j]; }
+                    x[c] = h;
                 }
                 wl = x[0]; wr = x[1];
             }
             wl *= 2.0f; wr *= 2.0f;   // подъём уровня мокрого сигнала (выходной лимитер держит пики)
+            // автогромкость под капотом: если мокрый сигнал долго громче нормы (≈ −15 дБ), он плавно уходит тише (до −6 дБ)
+            {
+                const float e2 = .5f * (wl * wl + wr * wr);
+                agcEnv += (e2 - agcEnv) * k.agcEnv;
+                const float rms = std::sqrt (agcEnv);
+                const float tg = rms > .18f ? std::max (.5f, .18f / rms) : 1.0f;
+                agcG += (tg - agcG) * (tg < agcG ? k.agcDown : k.agcUp);
+                wl *= agcG; wr *= agcG;
+            }
 
             float oL = wl * xf * sMix + dryL * (1 - sMix);
             float oR = wr * xf * sMix + dryR * (1 - sMix);
@@ -895,7 +951,7 @@ private:
         d.lp2 += (x - d.lp2) * hcB;
         x = (1 - he) * x + he * (d.lp2 * hcG - d.lp2 * d.lp2 * hcS);
         // слой со своим характером темнеет или светлеет с каждым кругом
-        const float la = sLay * live;
+        const float la = sLay * live * chFade;
         if (d.band >= 0 && la > 1e-4f)
         {
             switch (d.band)
@@ -908,6 +964,8 @@ private:
         }
         return x;
     }
+    // общее усиление петли не выше 0.998 (в заморозке — ровно 1): память не раскачивается сама
+    static float loopCap (float gain, float frozen) { const float lim = .998f + .002f * frozen; return gain > lim ? lim / gain : 1.0f; }
     // «распускающийся» компрессор: тихое поднимает до ×1.8, громкое прижимает
     float bloomGain (Deg& d, float s, float amt)
     {
@@ -964,7 +1022,8 @@ private:
         const float old = at (0, w[0]);
         const float x = degrade (deg[0], old, std::max (rg[0], rg[1])) * dk;
         const float b = bloomGain (deg[0], monoIn + x, bloomAmt);
-        writeLine (0, deg[0], b * (x * fb + monoIn), wd);
+        const float cap = loopCap (dk * fb * b, 1 - std::max (rg[0], rg[1]));
+        writeLine (0, deg[0], b * (x * fb * cap + monoIn), wd);
 
         const float sp = sSpread, dr = sDrift * .9f;
         float sumL = grainSet (gL, len, [&] { return sp * rng.uni() + dr * lfo[1].v; });
@@ -1018,7 +1077,8 @@ private:
             const float prev = dOut[(s + 3) & 3] * fbStage;
             const float x = degrade (deg[s], prev, rg[c]) * duck[c];
             const float b = bloomGain (deg[s], g[c] + x, bloomAmt);
-            float v = b * (x + g[c]);
+            const float cap = loopCap (b * fbStage * duck[c], 1 - rg[c]);
+            float v = b * (x * cap + g[c]);
             deg[s].dc += (v - deg[s].dc) * k.dc; v -= deg[s].dc;
             v = ruinCrush (deg[s], v);
             v = limitStep (v, deg[s].env, k.limAtk, k.limRel);
@@ -1057,8 +1117,9 @@ private:
             const int ch = l & 1;
             x[l] = degrade (deg[l], x[l], rg[ch]) * duck[ch];
             const float b = bloomGain (deg[l], g[ch] + x[l], bloomAmt);
+            const float cap = loopCap (b * fbg[ch] * duck[ch], 1 - rg[ch]);
             x[l] *= b;
-            writeLine (l, deg[l], x[l] * fbg[ch] + g[ch] * b, wd);
+            writeLine (l, deg[l], x[l] * fbg[ch] * cap + g[ch] * b, wd);
         }
         const float d = sDrift;
         const float A = lfo[0].v, B = lfo[1].v, C = lfo[2].v, D = lfo[3].v;
@@ -1078,8 +1139,9 @@ private:
         {
             x[l] = degrade (deg[l], x[l], rg[l]) * duck[l];
             const float b = bloomGain (deg[l], g[l] + x[l], bloomAmt);
+            const float cap = loopCap (b * fbg[l] * duck[l], 1 - rg[l]);
             x[l] *= b;
-            writeLine (l, deg[l], x[l] * fbg[l] + g[l] * b, wd);
+            writeLine (l, deg[l], x[l] * fbg[l] * cap + g[l] * b, wd);
         }
         const float d = sDrift, A = lfo[0].v, B = lfo[1].v;
         addLayer (x[0], 1 - A * d, A * d);
@@ -1124,7 +1186,7 @@ private:
     void layerStage (float& wl, float& wr)
     {
         static const float pos3[3] = { -.8f, .8f, 0.0f }, pos4[4] = { -.85f, .85f, -.4f, .4f };
-        const float la = sLay, pp = sPP;
+        const float la = sLay * chFade, pp = sPP;
         const float fb = .3f + .5f * pp;
         for (int j = 0; j < ln; ++j)
         {
@@ -1158,6 +1220,35 @@ private:
     }
 
     // DEPTH (саб на октаву ниже + подъём низа) и TONE (наклон вокруг 900 Гц)
+    // Под капотом: если середина (300 Гц – 3 кГц) выпирает, она мягко прижимается (до −6 дБ),
+    // а слишком резкие атаки мокрого сигнала сглаживаются — звук не бьёт «в лоб».
+    void clarity (float& wl, float& wr)
+    {
+        const float amt = clarityT >= 0 ? clarityT : .6f + .4f * sSpace;
+        if (amt <= 1e-4f) return;
+        float x[2] = { wl, wr }, mid[2];
+        for (int c = 0; c < 2; ++c)
+        {
+            clHp[c] += (x[c] - clHp[c]) * k.cl300;  const float hp = x[c] - clHp[c];
+            clLp[c] += (hp - clLp[c]) * k.cl3000;   mid[c] = clLp[c];
+        }
+        const float em = .5f * (mid[0] * mid[0] + mid[1] * mid[1]), ea = .5f * (x[0] * x[0] + x[1] * x[1]);
+        eMid += (em - eMid) * k.clEnv; eAll += (ea - eAll) * k.clEnv;
+        const float ratio = eAll > 1e-9f ? eMid / eAll : 0.0f;          // доля середины в энергии
+        const float target = .35f;
+        const float gT = ratio > target ? std::max (.5f, std::sqrt (target / ratio)) : 1.0f;
+        gMid += (gT - gMid) * (gT < gMid ? k.clAtk : k.clRel);
+        const float gm = 1.0f - amt * (1.0f - gMid * .92f);             // плюс постоянный лёгкий провал −0.7 дБ
+        // мягкие атаки: быстрая огибающая против медленной
+        const float a = std::max (std::fabs (x[0]), std::fabs (x[1]));
+        tFast += (a - tFast) * k.trFast; tSlow += (a - tSlow) * k.trSlow;
+        const float tg = tFast > tSlow * 1.5f + 1e-5f ? (tSlow * 1.5f + 1e-5f) / tFast : 1.0f;
+        gTr += (tg - gTr) * (tg < gTr ? k.trAtk : k.trRel);
+        const float gt = 1.0f - amt * .7f * (1.0f - gTr);
+        for (int c = 0; c < 2; ++c) x[c] = (x[c] + (gm - 1.0f) * mid[c]) * gt;
+        wl = x[0]; wr = x[1];
+    }
+
     // DEPTH: саб −12 и −24 (только октавы — всегда в тональности), упругий: следует за игрой
     void depthTone (float& wl, float& wr, float dryMono)
     {
@@ -1293,6 +1384,8 @@ private:
         float b700 = 0, b150 = 0, b2500 = 0, b1500 = 0, b4000 = 0, t1500 = 0, t400 = 0, t1000 = 0, pp = 0, tank = 0, blur = 0;
         float b100 = 0, b3000 = 0, b7000 = 0, b11000 = 0, up = 0, sub = 0, shelf = 0, tilt = 0, limAtkOut = 0, limRelOut = 0, dc = 0, dcOut = 0;
         float bass = 0, sub2 = 0, monoLo = 0, envAtkS = 0, envRelS = 0, envSlowS = 0;
+        float cl300 = 0, cl3000 = 0, clEnv = 0, clAtk = 0, clRel = 0, trFast = 0, trSlow = 0, trAtk = 0, trRel = 0, playRate = 0;
+        float chFade = 0, agcEnv = 0, agcDown = 0, agcUp = 0;
         float crackDecay = 0, crackLp = 0;
         int crushN = 6;
     } k;
@@ -1324,7 +1417,15 @@ private:
     Reverb reverb;
     Prism prism;
     float sSpace = 0, sShim = 0, sPrism = 0, preDelay = 1000, shimRatio = 2, revLvl = 0;
-    float tLoA = 0, tHiA = 1, sTLo = 0, sTHi = 1, tf[2][4] {};
+    float tLoA = 0, tHiA = 1, sTLo = 0, sTHi = 1, tf[2][8] {};
+    float agcEnv = 0, agcG = 1, chFade = 1;
+    bool chPending = false;
+    LayerChar pendingCh[4];
+    float tailLoBase = 40, tailHiBase = 16000, playF = 1, clarityT = -1;
+    bool tailLoOff = false, tailHiOff = false;
+    int tailCnt = 0;
+    // автокоррекция середины и мягкие атаки
+    float clLp[2] {}, clHp[2] {}, eMid = 0, eAll = 0, gMid = 1, tFast = 0, tSlow = 0, gTr = 1;
     Rng ruinRng { 0x7f4a7c15u };
     float pinkB[2][3] {}, crackEnv[2] {}, crackAmp[2] {}, crackLp[2] {};
     float lastErode = -1; int erodeCount = 0;
