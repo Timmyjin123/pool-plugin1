@@ -65,6 +65,7 @@ sudo codesign --force --deep -s - /Library/Audio/Plug-Ins/VST3/Memoria.vst3
 - Тональный отчёт по пресетам (полосы, наклон относительно входа): `g++ -O2 -std=c++17 memoria/tests/tone_report.cpp -o /tmp/tr && /tmp/tr`
 - «Текучесть» пресетов на последовательности аккордов: `g++ -O2 -std=c++17 memoria/tests/flow_report.cpp -o /tmp/fr && /tmp/fr Течение`
 - Детектор щелчков и зашкала по всем пресетам: `g++ -O2 -std=c++17 memoria/tests/click_report.cpp -o /tmp/cr && /tmp/cr`
+- Щелчки при изменении параметров (ручки, кнопки, смена пресетов): `g++ -O2 -std=c++17 memoria/tests/automation_clicks.cpp -o /tmp/ac && /tmp/ac`
 - Тест движка без JUCE: `g++ -O2 -std=c++17 memoria/tests/engine_test.cpp -o /tmp/mt && /tmp/mt`
 - Снимок окна (Linux): `cmake -S memoria -B build -DMEMORIA_TOOLS=ON && cmake --build build --target memoria_snapshot`,
   затем `xvfb-run build/memoria_snapshot_artefacts/Release/memoria_snapshot out.png 0 9`.

@@ -315,6 +315,7 @@ struct Reverb
     static constexpr int NL = 8;
     std::vector<float> line[NL];
     int len[NL] {}, cap[NL] {}, w[NL] {};
+    float lenF[NL] {};   // фактическая длина: плавно скользит к len, без скачков
     float lpD[NL] {}, lpL[NL] {}, modPh[NL] {}, modInc[NL] {};
     float g[NL] {}, gLow[NL] {};
     std::vector<float> pre[2]; int preCap = 1, preW = 0;
@@ -338,6 +339,7 @@ struct Reverb
             modPh[i] = (float) i * .7f;
             modInc[i] = (float) (2 * 3.14159265358979 * (.07 + .045 * i) / sr);
             len[i] = (int) (base[i] * .001 * sr);
+            lenF[i] = (float) len[i];
         }
         preCap = (int) (.16 * sr) + 4;
         for (auto& b : pre) b.assign ((size_t) preCap, 0.0f);
@@ -367,6 +369,7 @@ struct Reverb
                 g[i] = (float) std::pow (10.0, -3.0 * t / rt);
                 gLow[i] = (float) std::pow (10.0, -3.0 * t / (rt * 1.5));   // низ звучит в полтора раза дольше
             }
+            if (lastRt < 0) for (int i = 0; i < NL; ++i) lenF[i] = (float) len[i];
             lastRt = rt; lastSize = size;
         }
         aDamp = (float) (1.0 - std::exp (-2.0 * 3.14159265358979 * damp / sr));
@@ -392,7 +395,9 @@ struct Reverb
         for (int i = 0; i < NL; ++i)
         {
             modPh[i] += modInc[i]; if (modPh[i] > 6.2831853f) modPh[i] -= 6.2831853f;
-            v[i] = rd (i, (float) len[i] + modDepth * (1.0f + std::sin (modPh[i])));
+            const float dl = (float) len[i] - lenF[i];
+            lenF[i] += std::clamp (dl, -.03f, .03f);   // ≤ 3% скорости: смена размера зала звучит как мягкий проезд, без щелчка
+            v[i] = rd (i, lenF[i] + modDepth * (1.0f + std::sin (modPh[i])));
         }
         // шиммер: сумма хвоста, сдвинутая вверх, снова попадает в зал
         float sh = 0;
@@ -843,7 +848,7 @@ public:
             float wl = 0, wr = 0;
             layerStage (wl, wr);
             blurStage (wl, wr);
-            if (sChaos > 1e-4f || chaosSt.type != 0) chaosSt.process (wl, wr, sChaos);
+            chaosSt.process (wl, wr, sChaos);   // всегда в цепи: включение CHAOS не сдвигает сигнал и не щёлкает
             if (sRuin > 1e-4f) { const float fl = sRuin * sRuin * .006f; wl += fl * hiss[0]; wr += fl * hiss[1]; }
             // SPACE + SHIMMER: большой зал поверх мокрого сигнала, PRISM — переливы спектра
             if (sSpace > 1e-4f || sShim > 1e-4f)
@@ -884,7 +889,8 @@ public:
 
             float oL = wl * xf * sMix + dryL * (1 - sMix);
             float oR = wr * xf * sMix + dryR * (1 - sMix);
-            if (p.mono) oL = oR = (oL + oR) * .5f;
+            monoAmt += ((p.mono ? 1.0f : 0.0f) - monoAmt) * k.smooth;
+            if (monoAmt > 1e-4f) { const float m = (oL + oR) * .5f; oL += monoAmt * (m - oL); oR += monoAmt * (m - oR); }
             oL = warm (oL, wd) * sOut;
             oR = warm (oR, wd) * sOut;
             // плавный лимитер: пики уменьшают громкость, а не искажаются
@@ -1418,7 +1424,7 @@ private:
     Prism prism;
     float sSpace = 0, sShim = 0, sPrism = 0, preDelay = 1000, shimRatio = 2, revLvl = 0;
     float tLoA = 0, tHiA = 1, sTLo = 0, sTHi = 1, tf[2][8] {};
-    float agcEnv = 0, agcG = 1, chFade = 1;
+    float agcEnv = 0, agcG = 1, chFade = 1, monoAmt = 0;
     bool chPending = false;
     LayerChar pendingCh[4];
     float tailLoBase = 40, tailHiBase = 16000, playF = 1, clarityT = -1;
