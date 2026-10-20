@@ -10,6 +10,7 @@ struct Preset
     int mode, size;
     float decay, warmth, dynamics, spread, drift, mix;
     int lowcut, highcut;
+    float layers; int seed; float pingpong; bool blur;
 };
 const std::vector<Preset>& presets();
 }
@@ -42,6 +43,7 @@ public:
     void setStateInformation (const void*, int) override;
 
     void erase() { engine.requestErase(); }
+    void diceLayers();
     mem::Engine& getEngine() { return engine; }
 
     juce::AudioProcessorValueTreeState apvts;

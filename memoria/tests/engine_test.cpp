@@ -87,6 +87,44 @@ int main()
     std::printf ("  худший расход: %.2f%% одного ядра\n", worstCpu);
     CHECK (worstCpu < 15, "расход процессора умеренный");
 
+    std::printf ("== слои + пинг-понг + blur на случайных характерах\n");
+    double worstCpu2 = 0;
+    for (int m = 0; m < 4; ++m)
+        for (int seed : { 0, 17, 404, 999 })
+        {
+            Run r (sr);
+            r.p.mode = m; r.p.size = seed % 3; r.p.mix = 1; r.p.decay = .95f; r.p.warmth = .5f; r.p.dynamics = .9f;
+            r.p.spread = .7f; r.p.drift = .8f; r.p.layers = 1; r.p.layerSeed = seed; r.p.pingpong = 1; r.p.blur = true;
+            const auto t0 = std::chrono::steady_clock::now();
+            const double a = r.run (14, 1);
+            const double t = r.run (10, 0);
+            const double secs = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+            worstCpu2 = std::max (worstCpu2, secs / 24.0 * 100.0);
+            char buf[160];
+            std::snprintf (buf, sizeof buf, "%s seed %d: без NaN, пик <= 0 дБ, звучит (rms %.3f / хвост %.3f, пик %.3f)", modeName (m), seed, a, t, r.peak);
+            CHECK (! r.nan && r.peak <= 1.0f && a > .01, buf);
+        }
+    std::printf ("  худший расход со всеми эффектами: %.2f%%\n", worstCpu2);
+    CHECK (worstCpu2 < 20, "расход со слоями, пинг-понгом и blur умеренный");
+
+    std::printf ("== тёмный слой −12 добавляет октаву вниз\n");
+    {
+        auto energyAt = [&] (float layers, double f)
+        {
+            Run r (sr); r.p.mode = 2; r.p.size = 2; r.p.mix = 1; r.p.decay = .6f; r.p.highcut = 0; r.p.lowcut = 0;
+            r.p.layers = layers; r.p.layerSeed = 0; r.p.warmth = 0;
+            std::vector<float> cap;
+            r.run (6, 1);
+            r.run (3, 1, &cap);
+            double re = 0, im = 0;
+            for (size_t i = 0; i < cap.size(); ++i) { const double w = 2 * M_PI * f * (double) i / sr; re += cap[i] * std::cos (w); im += cap[i] * std::sin (w); }
+            return std::sqrt (re * re + im * im) / (double) cap.size();
+        };
+        const double off440 = energyAt (0, 110), on440 = energyAt (1, 110);
+        std::printf ("  энергия на 110 Гц: слои выкл %.5f, вкл %.5f\n", off440, on440);
+        CHECK (on440 > off440 * 3, "октава вниз появляется в спектре");
+    }
+
     std::printf ("== decay = 0: память быстро гаснет\n");
     {
         Run r (sr); r.p.mode = 3; r.p.size = 2; r.p.mix = 1; r.p.decay = 0; r.p.highcut = 0;

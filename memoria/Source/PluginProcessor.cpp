@@ -5,16 +5,32 @@ static juce::String U (const char* s) { return juce::String::fromUTF8 (s); }
 
 const std::vector<memoria::Preset>& memoria::presets()
 {
-    //                         name                     mode size decay warm  dyn  spread drift mix  lc hc
+    //  name                       mode size decay warm  dyn  spread drift mix  lc hc  layers seed  pp   blur
     static const std::vector<Preset> p = {
-        { "Испарение",              0, 0, .75f, .30f, .30f, .35f, .50f, .55f, 1, 2 },
-        { "Облако пыли",            0, 2, .60f, .50f, .50f, .80f, .80f, .60f, 0, 1 },
-        { "Собор памяти",           1, 0, .90f, .15f, .70f, .30f, .60f, .50f, 1, 1 },
-        { "Медленный хор",          1, 1, .80f, .25f, .20f, .50f, .40f, .45f, 2, 2 },
-        { "Созвездие",              2, 0, .85f, .20f, .80f, .60f, .90f, .60f, 1, 1 },
-        { "Эхо-сеть",               2, 2, .70f, .35f, .40f, .30f, .50f, .45f, 1, 2 },
-        { "Две ленты",              3, 0, .95f, .20f, .60f, .20f, .50f, .50f, 1, 2 },
-        { "Короткие петли",         3, 2, .80f, .40f, .30f, .50f, .70f, .50f, 2, 3 },
+        { "Испарение",                 0, 0, .75f, .30f, .30f, .35f, .50f, .55f, 1, 2, .30f,   0, .15f, false },
+        { "Облако пыли",               0, 2, .60f, .50f, .50f, .80f, .80f, .60f, 0, 1, .60f,  23, .30f, true  },
+        { "Собор памяти",              1, 0, .90f, .15f, .70f, .30f, .60f, .50f, 1, 1, .40f,   0, .20f, false },
+        { "Медленный хор",             1, 1, .80f, .25f, .20f, .50f, .40f, .45f, 2, 2, .50f,   7, .10f, false },
+        { "Созвездие",                 2, 0, .85f, .20f, .80f, .60f, .90f, .60f, 1, 1, .70f,   0, .40f, false },
+        { "Эхо-сеть",                  2, 2, .70f, .35f, .40f, .30f, .50f, .45f, 1, 2, .30f,  51, .70f, false },
+        { "Две ленты",                 3, 0, .95f, .20f, .60f, .20f, .50f, .50f, 1, 2, .20f,   0, .20f, false },
+        { "Короткие петли",            3, 2, .80f, .40f, .30f, .50f, .70f, .50f, 2, 3, .50f,  88, .50f, false },
+        { "Бесконечный дрон",          2, 1, .98f, .30f, .95f, .50f, .60f, .70f, 1, 2, .80f,   0, .30f, true  },
+        { "Туман над водой",           1, 0, .92f, .20f, .85f, .40f, .70f, .65f, 2, 2, .60f,  12, .20f, true  },
+        { "Пинг-понг галактика",       2, 2, .75f, .25f, .55f, .40f, .60f, .55f, 1, 1, .50f,   0, 1.0f, false },
+        { "Стеклянные слои",           0, 1, .80f, .15f, .60f, .55f, .60f, .60f, 2, 1, .90f, 314, .40f, false },
+        { "Тёплая лента",              3, 1, .88f, .70f, .40f, .30f, .40f, .50f, 1, 3, .40f,   0, .20f, false },
+        { "Хрупкое эхо",               0, 2, .65f, .45f, .25f, .70f, .50f, .50f, 3, 1, .70f, 777, .80f, false },
+        { "Глубокий космос",           1, 0, .97f, .15f, .90f, .25f, .90f, .70f, 1, 2, .70f,  42, .30f, true  },
+        { "Шёпот памяти",              0, 0, .85f, .25f, .10f, .30f, .40f, .45f, 2, 3, .50f,   5, .30f, true  },
+        { "Хор призраков",             1, 1, .90f, .30f, .20f, .60f, .80f, .60f, 1, 2, 1.0f,   0, .40f, true  },
+        { "Ржавые петли",              3, 2, .85f, .85f, .50f, .60f, .50f, .55f, 0, 3, .80f, 666, .50f, false },
+        { "Северное сияние",           2, 0, .93f, .20f, .75f, .70f, 1.0f, .65f, 1, 1, .90f, 101, .60f, true  },
+        { "Пульс в тумане",            3, 2, .78f, .35f, .30f, .40f, .60f, .50f, 2, 2, .60f,   9, .90f, true  },
+        { "Медленное таяние",          1, 0, .99f, .25f, .65f, .30f, .30f, .60f, 1, 2, .30f,   0, .10f, true  },
+        { "Зерно и пыль",              0, 2, .70f, .60f, .70f, .90f, .90f, .60f, 1, 3, 1.0f, 250, .60f, false },
+        { "Колокола вдали",            2, 1, .88f, .10f, .80f, .55f, .70f, .60f, 3, 1, .80f,  31, .70f, true  },
+        { "Ковёр из памяти",           1, 2, .95f, .30f, .85f, .50f, .60f, .70f, 1, 2, .70f,   0, .50f, true  },
     };
     return p;
 }
@@ -42,7 +58,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout MemoriaProcessor::makeLayout
     f01 ("spread", "Разброс / связь линий", .35f);
     f01 ("drift", "Дрейф", .5f);
     f01 ("mix", "Сухой / мокрый", .5f);
-    ps.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "output", 1 }, U ("Выход"), NormalisableRange<float> (-24, 6), 0,
+    ps.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "output", 1 }, U ("Выход"), NormalisableRange<float> (-24, 18), 0,
         AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return String (v, 1) + U (" дБ"); })));
     ps.push_back (std::make_unique<AudioParameterChoice> (ParameterID { "lowcut", 1 }, U ("Срез низа в петле"), StringArray { U ("выкл"), "1", "2", "3" }, 1));
     ps.push_back (std::make_unique<AudioParameterChoice> (ParameterID { "highcut", 1 }, U ("Срез верха в петле"), StringArray { U ("выкл"), "1", "2", "3" }, 2));
@@ -50,6 +66,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout MemoriaProcessor::makeLayout
     ps.push_back (std::make_unique<AudioParameterBool> (ParameterID { "freeze", 1 }, U ("Заморозка"), false));
     ps.push_back (std::make_unique<AudioParameterBool> (ParameterID { "reverse", 1 }, U ("Обратное направление"), false));
     ps.push_back (std::make_unique<AudioParameterBool> (ParameterID { "mono", 1 }, U ("Моно-выход"), false));
+    f01 ("layers", "Слои: разная обработка каждого слоя", .4f);
+    ps.push_back (std::make_unique<AudioParameterInt> (ParameterID { "layerSeed", 1 }, U ("Набор характеров слоёв"), 0, 999, 0));
+    f01 ("pingpong", "Пинг-понг на слоях", .25f);
+    ps.push_back (std::make_unique<AudioParameterBool> (ParameterID { "blur", 1 }, U ("Размыть (Blur)"), false));
     return { ps.begin(), ps.end() };
 }
 
@@ -97,6 +117,10 @@ void MemoriaProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBu
     p.freeze = val ("freeze") > .5f;
     p.reverse = val ("reverse") > .5f;
     p.mono = val ("mono") > .5f;
+    p.layers = val ("layers");
+    p.layerSeed = (int) val ("layerSeed");
+    p.pingpong = val ("pingpong");
+    p.blur = val ("blur") > .5f;
 
     float* l = buf.getWritePointer (0);
     float* r = buf.getWritePointer (1);
@@ -119,6 +143,13 @@ void MemoriaProcessor::setCurrentProgram (int i)
     set ("decay", pr.decay); set ("warmth", pr.warmth); set ("dynamics", pr.dynamics);
     set ("spread", pr.spread); set ("drift", pr.drift); set ("mix", pr.mix);
     set ("lowcut", (float) pr.lowcut); set ("highcut", (float) pr.highcut);
+    set ("layers", pr.layers); set ("layerSeed", (float) pr.seed); set ("pingpong", pr.pingpong); set ("blur", pr.blur ? 1.0f : 0.0f);
+}
+
+void MemoriaProcessor::diceLayers()
+{
+    if (auto* par = apvts.getParameter ("layerSeed"))
+        par->setValueNotifyingHost (par->convertTo0to1 ((float) juce::Random::getSystemRandom().nextInt ({ 1, 1000 })));
 }
 
 const juce::String MemoriaProcessor::getProgramName (int i)

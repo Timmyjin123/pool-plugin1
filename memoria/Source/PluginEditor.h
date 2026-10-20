@@ -16,6 +16,14 @@ struct Pal
         return juce::Colour (c[juce::jlimit (0, 3, m)]);
     }
     static juce::Colour ice()   { return juce::Colour (0xff9fe7ff); }
+    static juce::Colour blur()  { return juce::Colour (0xffff8bd8); }
+    // цвет слоя: оттенок режима, сдвинутый по кругу
+    static juce::Colour layer (int m, int j)
+    {
+        static const float sh[4] = { -.09f, .0f, .09f, .18f };
+        const auto c = mode (m);
+        return c.withHue (std::fmod (c.getHue() + sh[j & 3] + 1.0f, 1.0f)).withSaturation (juce::jmin (1.0f, c.getSaturation() * .9f + .1f));
+    }
     static juce::Colour warn()  { return juce::Colour (0xffff5a7a); }
 };
 
@@ -111,6 +119,19 @@ private:
     std::vector<Star> stars;
 };
 
+// Карточки слоёв: характер каждого слоя и его уровень
+class LayerPanel : public juce::Component, public juce::SettableTooltipClient, private juce::Timer
+{
+public:
+    explicit LayerPanel (MemoriaProcessor& p) : proc (p) { startTimerHz (15); setInterceptsMouseClicks (true, false); }
+    ~LayerPanel() override { stopTimer(); }
+    void paint (juce::Graphics&) override;
+    void mouseUp (const juce::MouseEvent&) override { proc.diceLayers(); }
+private:
+    void timerCallback() override { repaint(); }
+    MemoriaProcessor& proc;
+};
+
 class MemoriaEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
@@ -123,6 +144,7 @@ private:
     MemoriaProcessor& proc;
     mui::Look look;
     MemoryRing ring;
+    LayerPanel layerPanel;
     Segments modeSeg, sizeSeg;
     juce::OwnedArray<Knob> knobs;
     juce::OwnedArray<Chip> chips;

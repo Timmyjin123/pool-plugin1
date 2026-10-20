@@ -255,11 +255,12 @@ void MemoryRing::paint (juce::Graphics& g)
     const int mode = v.mode.load();
     const auto acc = Pal::mode (mode);
     const float W = (float) getWidth(), H = (float) getHeight();
-    const float cx = W * .5f, cy = H * .5f;
+    const float cx = W * .45f, cy = H * .5f;
     const float R = juce::jmin (H * .3f, 88.0f);
     const float xf = .25f + .75f * v.xf.load();
     const bool frozen = proc.apvts.getRawParameterValue ("freeze")->load() > .5f;
     const float drift = proc.apvts.getRawParameterValue ("drift")->load();
+    const float la = v.layers.load(), bl = v.blur.load();
 
     // звёздная пыль
     for (auto& s : stars)
@@ -302,6 +303,15 @@ void MemoryRing::paint (juce::Graphics& g)
             g.strokePath (arc, juce::PathStrokeType (1.2f));
         }
 
+        // дымка размытия
+        if (bl > .01f)
+            for (int i = 0; i < 5; ++i)
+            {
+                const float rr = R + 6 + (float) i * 8;
+                g.setColour (Pal::blur().withAlpha (.035f * bl * (float) (5 - i)));
+                g.drawEllipse (juce::Rectangle<float> (rr * 2, rr * 2).withCentre ({ cx, cy }), 10.0f);
+            }
+
         // материал: штрихи, тускнеющие с возрастом
         int b = 0;
         for (int l = 0; l < n; ++l)
@@ -314,9 +324,11 @@ void MemoryRing::paint (juce::Graphics& g)
                 const float amp = std::pow (juce::jmin (1.0f, env[(size_t) b] * 1.7f), .7f);
                 const float fresh = std::pow (1.0f - age[(size_t) b], 1.6f);
                 const float alpha = (.12f + .88f * fresh) * xf;
-                const auto c = (frozen ? Pal::ice() : acc).interpolatedWith (juce::Colours::white, fresh * .25f);
-                g.setColour (c.withAlpha (alpha));
-                g.drawLine (juce::Line<float> (P (ang, R + 3), P (ang, R + 4 + amp * 34)), 1.7f);
+                const int layerIdx = mode == 1 ? l / 2 : (mode == 0 ? -1 : l);
+                auto base = layerIdx >= 0 ? acc.interpolatedWith (Pal::layer (mode, layerIdx), la) : acc;
+                const auto c = (frozen ? Pal::ice() : base).interpolatedWith (juce::Colours::white, fresh * .25f);
+                g.setColour (c.withAlpha (alpha * (1 - .35f * bl)));
+                g.drawLine (juce::Line<float> (P (ang, R + 3), P (ang, R + 4 + amp * 34)), 1.7f + bl * 3.0f);
                 g.setColour (c.withAlpha (alpha * .3f));
                 g.drawLine (juce::Line<float> (P (ang, R - 3), P (ang, R - 3 - amp * 12)), 1.4f);
             }
@@ -349,7 +361,7 @@ void MemoryRing::paint (juce::Graphics& g)
                 g.setColour (acc.withAlpha (am * .25f));
                 g.drawLine (juce::Line<float> (P (ang, rr), P (ang, R - 4)), 1.0f);
                 const float sz = 2.5f + am * 6;
-                g.setColour (acc.brighter (.4f).withAlpha (.25f + .75f * am));
+                g.setColour (acc.interpolatedWith (Pal::layer (0, gi / 4), la).brighter (.4f).withAlpha (.25f + .75f * am));
                 g.fillEllipse (juce::Rectangle<float> (sz, sz).withCentre (P (ang, rr)));
             }
         }
@@ -401,7 +413,8 @@ void MemoryRing::paint (juce::Graphics& g)
     };
     float by = 24;
     if (frozen) { badge ("FROZEN", Pal::ice(), by); by += 28; }
-    if (v.dir.load() < 0) badge (U ("◂ REVERSE"), acc, by);
+    if (v.dir.load() < 0) { badge (U ("◂ REVERSE"), acc, by); by += 28; }
+    if (bl > .5f) badge ("BLUR", Pal::blur(), by);
 
     // уровни входа и выхода
     auto meter = [&] (float x, float level, const juce::String& name)
@@ -422,7 +435,7 @@ void MemoryRing::paint (juce::Graphics& g)
 
 // ============================================================ Editor
 MemoriaEditor::MemoriaEditor (MemoriaProcessor& p)
-    : AudioProcessorEditor (p), proc (p), ring (p),
+    : AudioProcessorEditor (p), proc (p), ring (p), layerPanel (p),
       modeSeg (p, "mode", { "GRAINS", "DIFFUSE", "NETWORK", "TAPES" }, true),
       sizeSeg (p, "size", { "LONG", "MID", "SHORT" }, false)
 {
@@ -435,31 +448,40 @@ MemoriaEditor::MemoriaEditor (MemoriaProcessor& p)
 
     struct K { const char* id; const char* title; bool bip; };
     for (auto k : { K { "decay", "DECAY", false }, K { "warmth", "WARMTH", false }, K { "dynamics", "DYNAMICS", true },
-                    K { "spread", "SPREAD", false }, K { "drift", "DRIFT", false }, K { "mix", "MIX", false }, K { "output", "OUTPUT", false } })
+                    K { "spread", "SPREAD", false }, K { "drift", "DRIFT", false }, K { "layers", "LAYERS", false },
+                    K { "pingpong", "PING-PONG", false }, K { "mix", "MIX", false }, K { "output", "OUTPUT", false } })
         addAndMakeVisible (knobs.add (new Knob (p, k.id, k.title, k.bip)));
     knobs[2]->setTooltip (U ("Влево — память приглушается, пока играешь, и наплывает, когда перестаёшь. Вправо — тихие хвосты распускаются в ровный дрон."));
     knobs[3]->setTooltip (U ("Grains — разброс позиций гранул. Network и Tapes — сколько звука перетекает между линиями."));
     knobs[4]->setTooltip (U ("Глубина медленных непериодичных LFO: движение гранул и плавающая панорама линий."));
+    knobs[5]->setTooltip (U ("Слои: каждый слой получает свою полосу частот, сдвиг высоты, текстуру и место в стерео. В петле слои ещё и темнеют или светлеют по-своему."));
+    knobs[6]->setTooltip (U ("Пинг-понг: у каждого слоя своя задержка, эхо прыгает между левым и правым каналом."));
 
     const auto modeC = Pal::mode (0);
-    addAndMakeVisible (chips.add (new Chip (p, "lowcut", "LOW-CUT", Chip::Cycle, modeC)));
-    addAndMakeVisible (chips.add (new Chip (p, "highcut", "HIGH-CUT", Chip::Cycle, modeC)));
+    addAndMakeVisible (chips.add (new Chip (p, "lowcut", "LO-CUT", Chip::Cycle, modeC)));
+    addAndMakeVisible (chips.add (new Chip (p, "highcut", "HI-CUT", Chip::Cycle, modeC)));
     addAndMakeVisible (chips.add (new Chip (p, "input", "INPUT", Chip::Cycle, modeC)));
     addAndMakeVisible (chips.add (new Chip (p, "freeze", "FREEZE", Chip::Toggle, Pal::ice())));
     addAndMakeVisible (chips.add (new Chip (p, "reverse", "REVERSE", Chip::Toggle, modeC)));
+    addAndMakeVisible (chips.add (new Chip (p, "blur", "BLUR", Chip::Toggle, Pal::blur())));
+    addAndMakeVisible (chips.add (new Chip ("DICE", [this] { proc.diceLayers(); }, modeC)));
     addAndMakeVisible (chips.add (new Chip (p, "mono", "MONO", Chip::Toggle, modeC)));
     addAndMakeVisible (chips.add (new Chip ("ERASE", [this] { proc.erase(); }, Pal::warn())));
     chips[0]->setTooltip (U ("Срез низа в петле: каждый круг память становится тоньше (3 степени)"));
     chips[1]->setTooltip (U ("Срез верха с тёплой сатурацией в петле: каждый круг память темнеет (3 степени)"));
     chips[3]->setTooltip (U ("Заморозка: вход не пишется, память кружит без потерь"));
-    chips[6]->setTooltip (U ("Стереть всю память"));
+    chips[5]->setTooltip (U ("Размыть всё в облако. Размытое понемногу дописывается в память, и дрон со временем становится мягче."));
+    chips[6]->setTooltip (U ("Случайно перетасовать характеры слоёв (полоса, высота, текстура)"));
+    chips[8]->setTooltip (U ("Стереть всю память"));
+    addAndMakeVisible (layerPanel);
+    layerPanel.setTooltip (U ("Характеры слоёв. Клик — перетасовать."));
 
     for (int i = 1; i <= (int) memoria::presets().size(); ++i) presetBox.addItem (proc.getProgramName (i), i);
     presetBox.setTextWhenNothingSelected (U ("— свой —"));
     presetBox.onChange = [this] { if (presetBox.getSelectedId() > 0) proc.setCurrentProgram (presetBox.getSelectedId()); };
     addAndMakeVisible (presetBox);
 
-    setSize (880, 580);
+    setSize (960, 600);
     startTimerHz (10);
     timerCallback();
 }
@@ -475,7 +497,7 @@ void MemoriaEditor::timerCallback()
         const auto c = Pal::mode (m);
         for (auto* k : knobs) k->setAccent (c);
         sizeSeg.setAccent (c);
-        for (int i : { 0, 1, 2, 4, 5 }) chips[i]->setAccent (c);
+        for (int i : { 0, 1, 2, 4, 6, 7 }) chips[i]->setAccent (c);
         repaint();
     }
     const int pr = proc.getCurrentProgram();
@@ -508,9 +530,53 @@ void MemoriaEditor::resized()
     sizeSeg.setBounds (sx + segW + gap, 62, sizeW, 32);
     ring.setBounds (0, 100, W, 300);
 
-    const int kw = 108, kx = (W - kw * knobs.size()) / 2;
+    layerPanel.setBounds (W - 268, 156, 214, 4 * 48);
+    const int kw = 100, kx = (W - kw * knobs.size()) / 2;
     for (int i = 0; i < knobs.size(); ++i) knobs[i]->setBounds (kx + i * kw, 416, kw, 100);
 
-    const int cw = 114, cg = 8, cx = (W - cw * chips.size() - cg * (chips.size() - 1)) / 2;
-    for (int i = 0; i < chips.size(); ++i) chips[i]->setBounds (cx + i * (cw + cg), 530, cw, 32);
+    const int cw = 98, cg = 6, cx = (W - cw * chips.size() - cg * (chips.size() - 1)) / 2;
+    for (int i = 0; i < chips.size(); ++i) chips[i]->setBounds (cx + i * (cw + cg), 540, cw, 32);
+}
+
+// ============================================================ LayerPanel
+void LayerPanel::paint (juce::Graphics& g)
+{
+    auto& v = proc.getEngine().viz;
+    const int mode = v.mode.load();
+    const int n = juce::jmax (1, v.nLayers.load());
+    const float la = v.layers.load();
+    const float act = .35f + .65f * la;
+    for (int j = 0; j < 4; ++j)
+    {
+        const auto r = juce::Rectangle<float> (0, (float) j * 48, (float) getWidth(), 42);
+        const bool used = j < n;
+        const auto col = Pal::layer (mode, j);
+        g.setColour (Pal::panel().withAlpha (.85f));
+        g.fillRoundedRectangle (r, 8);
+        g.setColour ((used ? col : Pal::line()).withAlpha (used ? .45f * act : 1.0f));
+        g.drawRoundedRectangle (r.reduced (.5f), 8, 1);
+        if (! used) { g.setColour (Pal::dim().withAlpha (.5f)); g.setFont (F (10.5f, false, .1f)); g.drawText (U ("— нет в этом режиме —"), r, juce::Justification::centred); continue; }
+
+        const int semis = v.lSemis[(size_t) j].load();
+        const int band = v.lBand[(size_t) j].load(), tex = v.lTex[(size_t) j].load();
+        const float lvl = juce::jmin (1.0f, std::sqrt (v.lLvl[(size_t) j].load() * 6));
+        g.setColour (col.withAlpha (act));
+        g.fillEllipse (juce::Rectangle<float> (8, 8).withCentre ({ r.getX() + 14, r.getY() + 14 }));
+        g.setColour (Pal::text().withAlpha (.4f + .6f * act));
+        g.setFont (F (11, true, .14f));
+        g.drawText ("LAYER " + juce::String (j + 1), r.withTrimmedLeft (26).withHeight (26), juce::Justification::centredLeft);
+        g.setColour (Pal::dim());
+        g.setFont (F (10.5f, false, .1f));
+        g.drawText (juce::String (mem::bandName (band)) + U (" · ") + mem::texName (tex), r.withTrimmedLeft (26).withTrimmedTop (20).withHeight (16),
+                    juce::Justification::centredLeft);
+        g.setColour (col.withAlpha (act));
+        g.setFont (F (17, true));
+        const juce::String st = semis == 0 ? U ("±0") : (semis > 0 ? "+" + juce::String (semis) : U ("−") + juce::String (-semis));
+        g.drawText (st, r.withTrimmedRight (12), juce::Justification::centredRight);
+        // уровень слоя
+        g.setColour (Pal::line());
+        g.fillRoundedRectangle (r.getX() + 10, r.getBottom() - 5, r.getWidth() - 20, 2, 1);
+        g.setColour (col.withAlpha (.8f * act));
+        g.fillRoundedRectangle (r.getX() + 10, r.getBottom() - 5, (r.getWidth() - 20) * lvl, 2, 1);
+    }
 }

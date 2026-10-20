@@ -11,6 +11,7 @@ int main (int argc, char** argv)
     const double secs = argc > 3 ? juce::String (argv[3]).getDoubleValue() : 6.0;
     const bool freeze = argc > 4 && juce::String (argv[4]) == "1";
     const bool reverse = argc > 5 && juce::String (argv[5]) == "1";
+    const bool blur = argc > 6 && juce::String (argv[6]) == "1";
 
     MemoriaProcessor p;
     const double sr = 48000;
@@ -39,6 +40,7 @@ int main (int argc, char** argv)
         {
             if (freeze) set ("freeze", 1);
             if (reverse) set ("reverse", 1);
+            if (blur) { set ("blur", 1); set ("layers", 1); set ("pingpong", .7f); }
         }
         p.processBlock (buf, midi);
     }
