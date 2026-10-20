@@ -280,6 +280,17 @@ PoolEditor::PoolEditor (PoolProcessor& p) : AudioProcessorEditor (&p), proc (p),
     randBtn.onClick = [this] { proc.randomise(); presets.setSelectedId (1, juce::dontSendNotification); };
     addAndMakeVisible (randBtn);
 
+    {
+        static const int steps[] = { -24, -12, -7, -5, -2, 0, 2, 5, 7, 12, 24 };
+        for (int st : steps)
+        {
+            auto* c = chips.add (new juce::TextButton (st > 0 ? "+" + juce::String (st) : juce::String (st)));
+            c->getProperties().set ("col", (int) 0xffe8e8f0);
+            c->setTooltip (U ("Высота основного звука, полутонов"));
+            c->onClick = [this, st] { proc.setBaseNotify (P_ipitch, paramFromValue (paramSpecs()[P_ipitch], (float) st)); };
+            addAndMakeVisible (c);
+        }
+    }
     for (int g = 0; g < kNumGroups; ++g)
     {
         auto* b = tabs.add (new juce::TextButton (U (groupNames()[g])));
@@ -310,6 +321,10 @@ void PoolEditor::showGroup (int g)
 void PoolEditor::timerCallback()
 {
     for (int i = 0; i < knobs.size(); ++i) if (knobs[i]->isVisible()) { knobs[i]->setEffective (proc.getEffective (i)); knobs[i]->repaint(); }
+    {
+        const float ip = paramToValue (paramSpecs()[P_ipitch], proc.getBase (P_ipitch));
+        for (auto* c : chips) c->setToggleState (std::fabs (c->getButtonText().getFloatValue() - ip) < .5f, juce::dontSendNotification);
+    }
     if (freezeBtn.getToggleState() != proc.isFrozen()) freezeBtn.setToggleState (proc.isFrozen(), juce::dontSendNotification);
     const int id = proc.getCurrentProgram() + 1;
     if (presets.getSelectedId() != id && id >= 1) presets.setSelectedId (id, juce::dontSendNotification);
@@ -323,6 +338,8 @@ void PoolEditor::paint (juce::Graphics& g)
     g.setColour (Palette::dim()); g.setFont (F (12.0f));
     g.drawText (U ("текстуры из любого звука"), 108, 20, 220, 20, juce::Justification::centredLeft);
 
+    g.setColour (Palette::dim()); g.setFont (F (12.5f));
+    g.drawText (U ("Высота входа"), chipRow.withWidth (108), juce::Justification::centredLeft);
     const auto lvl = juce::Rectangle<float> (20, 628, 1000, 4);
     auto& e = proc.getEngine();
     const float v[3] = { e.levelGrain(), e.levelPad(), e.levelFar() };
@@ -344,8 +361,15 @@ void PoolEditor::resized()
     presets.setBounds (top.removeFromRight (230)); top.removeFromRight (4);
     prevBtn.setBounds (top.removeFromRight (36));
     r.removeFromTop (10);
-    visual.setBounds (r.removeFromTop (330));
-    r.removeFromTop (10);
+    visual.setBounds (r.removeFromTop (300));
+    r.removeFromTop (6);
+    chipRow = r.removeFromTop (26);
+    {
+        auto cr = chipRow; cr.removeFromLeft (110);
+        const int cw = juce::jmin (52, cr.getWidth() / juce::jmax (1, chips.size()));
+        for (auto* c : chips) c->setBounds (cr.removeFromLeft (cw).reduced (2, 0));
+    }
+    r.removeFromTop (8);
     auto tb = r.removeFromTop (30);
     const int tw = tb.getWidth() / juce::jmax (1, (int) tabs.size());
     for (auto* b : tabs) b->setBounds (tb.removeFromLeft (tw).reduced (2, 0));

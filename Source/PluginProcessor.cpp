@@ -14,6 +14,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout PoolProcessor::makeLayout()
             .withStringFromValueFunction ([s] (float x, int)
             {
                 const float v = paramToValue (s, x);
+                if (juce::String (s.id) == "gsnap")
+                {
+                    static const char* nm[4] = { "свободно", "полутона", "окт+квинты", "октавы" };
+                    return juce::String::fromUTF8 (nm[juce::jlimit (0, 3, (int) std::lround (v))]);
+                }
                 if (juce::String (s.id) == "pnote")
                 {
                     static const char* nm[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
@@ -95,6 +100,8 @@ EngineParams PoolProcessor::makeParams (double dt, int)
     e.ppos = clampf (v[P_pos] + (paramToValue (S[P_pos], getBase (P_pos)) - v[P_pos]) * stab, 0.f, 1.f);
     e.ppj = v[P_pj] * (1.0f - stab);
     e.pnote = v[P_pnote] < .5f ? 0 : (int) std::lround (v[P_pnote]) + 23;
+    e.pstrict = v[P_pstrict];
+    e.gsnap = (int) std::lround (v[P_gsnap]);
     e.pad = v[P_pad]; e.pdr = v[P_pdr]; e.pwid = v[P_pwid]; e.ppitch = v[P_ppitch]; e.pdark = v[P_pdark]; e.pwarm = v[P_pwarm];
     e.farLevel = v[P_far]; e.freg = v[P_freg]; e.fcl = v[P_fcl]; e.fdist = v[P_fdist]; e.fenv = fenv;
     e.drive = v[P_drive]; e.hp = v[P_hp]; e.lp = v[P_lp]; e.dt = v[P_dt]; e.df = v[P_df]; e.dm = v[P_dm]; e.rvm = v[P_rvm]; e.vol = v[P_vol];

@@ -101,5 +101,25 @@ int main()
         std::printf ("  lock A4, in %.0f Hz: @440=%.5f @in=%.5f\n", fin, a440, aIn);
         CHECK (a440 > 4 * aIn, "пэд подтянут к выбранной ноте");
     }
+
+    // строгость: чужой тон не должен оставаться вне гармоник ноты
+    {
+        double e0 = 0, e1 = 0;
+        for (int mode = 0; mode < 2; ++mode)
+        {
+            Engine e5; e5.prepare (sr); e5.setOffline (true);
+            EngineParams Q; Q.dw = 1; Q.dens = 0.05f; Q.drive = 1; Q.rvm = 0; Q.dm = 0; Q.farLevel = 0; Q.pad = 1; Q.pdr = 0; Q.pdark = 12000; Q.pwarm = 0; Q.pnote = 69; Q.pstrict = mode ? 1.0f : 0.0f; Q.vol = .8f; Q.hp = 20; Q.lp = 18000;
+            std::vector<float> out; double pa = 0, pb = 0;
+            for (int b = 0; b < (int) (sr * 12 / block); ++b)
+            {
+                for (int i = 0; i < block; ++i) { in[(size_t) i] = (float) (.4 * std::sin (pa) + .15 * std::sin (pb)); pa += kTwoPi * 200.0 / sr; pb += kTwoPi * 337.0 / sr; }
+                e5.process (in.data(), nullptr, l.data(), r.data(), block, Q);
+                if (b > (int) (sr * 6 / block)) out.insert (out.end(), l.begin(), l.end());
+            }
+            (mode ? e1 : e0) = goertzel (out, 337.0 * 440.0 / 200.0, sr);
+        }
+        std::printf ("  off-harmonic partial: strict0=%.5f strict1=%.5f\n", e0, e1);
+        CHECK (e1 < e0 * .25, "строгость убирает негармоничные тона");
+    }
     return fails ? 1 : 0;
 }

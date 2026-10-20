@@ -87,7 +87,8 @@ private:
     VisualComp visual;
     juce::ComboBox presets;
     juce::TextButton freezeBtn, randBtn, prevBtn, nextBtn;
-    juce::OwnedArray<juce::TextButton> tabs;
+    juce::OwnedArray<juce::TextButton> tabs, chips;
+    juce::Rectangle<int> chipRow;
     juce::OwnedArray<KnobComp> knobs;
     juce::TooltipWindow tooltip { this, 600 };
     int group = 0;

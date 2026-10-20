@@ -120,6 +120,7 @@ struct GrainParams
 {
     float size = 300, dens = 20, pos = .5f, pj = .3f, pitch = 0, ps = 0, harm = 0, rev = 0, wid = .8f, glitch = 0, crush = 0;
     bool freeze = false;
+    int snap = 0;   // 0 свободно, 1 полутона, 2 октавы+квинты, 3 октавы
 };
 
 class GrainCloud
@@ -211,6 +212,16 @@ private:
         if (! g) return;
         double len = P.size * sr / 1000.0 * (.75 + rng.uni() * .5);
         float semis = P.pitch + rng.bi() * P.ps;
+        if (P.snap == 1) semis = P.pitch + std::round (semis - P.pitch);
+        else if (P.snap >= 2)
+        {
+            static const float S2[5] = { 0, -7, 7, -12, 12 }, S3[3] = { 0, -12, 12 };
+            const float* set = P.snap == 2 ? S2 : S3;
+            const int cnt = P.snap == 2 ? 5 : 3;
+            float ok[5]; int m = 0;
+            for (int i = 0; i < cnt; ++i) if (std::fabs (set[i]) <= P.ps + .001f) ok[m++] = set[i];
+            semis = P.pitch + ok[(int) (rng.uni() * (float) m) % m];
+        }
         if (rng.uni() < P.harm) semis = P.pitch + IV[(int) (rng.uni() * 6.0f) % 6];
         float pj = P.pj;
         if (P.glitch > 0 && rng.uni() < P.glitch * .6f)
@@ -339,6 +350,7 @@ private:
 struct SpecParams
 {
     float pos = .5f, pj = 0, pdr = 0, pwid = 1, ppitch = 0, freg = 12, fcl = 0;
+    float strict = 0;           // строгость гармонического фильтра при заданной ноте
     int note = 0;               // 0 — выкл, иначе MIDI-нота, к которой подтягивается основной тон
     bool doPad = false, doFar = false;
     int head = 0;
@@ -457,7 +469,7 @@ private:
         const float* tc = TC.data(); const float* ts = TS.data();
 
         // Фиксация ноты: находим сильнейший тон в 40..1500 Гц и подтягиваем его к выбранной ноте
-        double lockR = 1.0;
+        double lockR = 1.0, tgtHz = 0;
         if (P.note > 0)
         {
             const int k0 = std::max (2, (int) (40.0 * N / sr)), k1 = std::min (H - 3, (int) (1500.0 * N / sr));
@@ -474,11 +486,13 @@ private:
                 const double hz = (kb + std::max (-.5, std::min (.5, off))) * sr / N;
                 const double target = 440.0 * std::pow (2.0, (P.note - 69) / 12.0);
                 lockR = std::max (.125, std::min (8.0, target / hz));
+                tgtHz = target;
             }
         }
 
         if (P.doPad)
         {
+            fillComb (tgtHz * std::pow (2.0, P.ppitch / 12.0), P.strict);
             std::fill (xlr.begin(), xlr.end(), 0.0); std::fill (xli.begin(), xli.end(), 0.0);
             std::fill (xrr.begin(), xrr.end(), 0.0); std::fill (xri.begin(), xri.end(), 0.0);
             const double dr = P.pdr, GN[4] = { 1, dr, dr * .7, dr * .45 };
@@ -493,7 +507,7 @@ private:
                 {
                     const double s = j / r; const int k = (int) s;
                     if (k >= H - 1) break;
-                    const double f = s - k, m = (mag[(size_t) k] * (1 - f) + mag[(size_t) k + 1] * f) * g;
+                    const double f = s - k, m = (mag[(size_t) k] * (1 - f) + mag[(size_t) k + 1] * f) * g * comb[(size_t) j];
                     const int a = (j + oL) & 65535, b = (j + oR) & 65535;
                     const double ur = tc[a], ui = ts[a];
                     xlr[(size_t) j] += m * ur; xli[(size_t) j] += m * ui;
@@ -504,6 +518,7 @@ private:
         }
         if (P.doFar)
         {
+            fillComb (tgtHz * std::pow (2.0, P.freg / 12.0), P.strict);
             std::fill (xlr.begin(), xlr.end(), 0.0); std::fill (xli.begin(), xli.end(), 0.0);
             std::fill (xrr.begin(), xrr.end(), 0.0); std::fill (xri.begin(), xri.end(), 0.0);
             const double Rg = std::pow (2.0, P.freg / 12.0) * lockR, sh = P.fcl, wd = P.pwid;
@@ -516,7 +531,7 @@ private:
                     const double s = j / r; const int k = (int) s;
                     if (k >= H - 1) break;
                     const double f = s - k, q = mag[(size_t) k] * (1 - f) + mag[(size_t) k + 1] * f, u = q / mx;
-                    const double m = q * ((1 - sh) + sh * u * u) * g;
+                    const double m = q * ((1 - sh) + sh * u * u) * g * comb[(size_t) j];
                     const int a = (j + oL) & 65535, b = (j + oR) & 65535;
                     const double ur = tc[a], ui = ts[a];
                     xlr[(size_t) j] += m * ur; xli[(size_t) j] += m * ui;
@@ -534,6 +549,27 @@ private:
         {
             std::copy (a->begin() + HP, a->end(), a->begin());
             std::fill (a->begin() + (N - HP), a->end(), 0.0);
+        }
+    }
+
+    // Вес гармонической гребёнки: оставляет частоты рядом с гармониками корня root (Гц); root<=0 — без фильтра
+    void fillComb (double root, double strict)
+    {
+        comb.assign ((size_t) H + 1, 1.0f);
+        if (root <= 1.0 || strict <= .001) return;
+        for (int j = 1; j < H; ++j)
+        {
+            const double ratio = (double) j * sr / N / root;
+            double w;
+            if (ratio < .75) w = 1.0 - .5 * strict;
+            else
+            {
+                const double h = std::max (1.0, std::floor (ratio + .5));
+                const double dev = 1200.0 * std::log2 (ratio / h) / 45.0;
+                w = (1 - strict) + strict * std::exp (-dev * dev);
+                if (h > 16) w *= std::pow (16.0 / h, strict);
+            }
+            comb[(size_t) j] = (float) w;
         }
     }
 
@@ -564,7 +600,7 @@ private:
     double sr = 48000;
     Rng rng;
     std::vector<double> re, im, mag, xlr, xli, xrr, xri, accL, accR, accFL, accFR;
-    std::vector<float> pwin, TC, TS;
+    std::vector<float> pwin, TC, TS, comb;
     Seg segA, segB;
     Seg* cur = nullptr;
     Seg* nxt = nullptr;
@@ -731,7 +767,8 @@ struct EngineParams
     float size = 300, dens = 20, pos = .5f, pj = .3f, pitch = 0, ps = 0, harm = 0, rev = 0, wid = .8f, glitch = 0, crush = 0;
     bool freeze = false;
     float ppos = .5f, ppj = .3f;   // позиция/разброс для пэда и далёкого голоса (стабильные)
-    int pnote = 0;
+    int pnote = 0, gsnap = 0;
+    float pstrict = .6f;
     float pad = .55f, pdr = .35f, pwid = .9f, ppitch = 0, pdark = 4500, pwarm = .25f;
     float farLevel = .5f, freg = 12, fcl = .6f, fdist = .5f, fenv = 1;
     float drive = 1.5f, hp = 60, lp = 12000, dt = .4f, df = .4f, dm = .3f, rvm = .5f, vol = .7f;
@@ -813,11 +850,11 @@ private:
 
         GrainParams gp;
         gp.size = P.size; gp.dens = P.dens; gp.pos = P.pos; gp.pj = P.pj; gp.pitch = P.pitch; gp.ps = P.ps; gp.harm = P.harm;
-        gp.rev = P.rev; gp.wid = P.wid; gp.glitch = P.glitch; gp.crush = P.crush; gp.freeze = P.freeze;
+        gp.rev = P.rev; gp.wid = P.wid; gp.glitch = P.glitch; gp.crush = P.crush; gp.freeze = P.freeze; gp.snap = P.gsnap;
         grains.process (xi, gL, gR, m, gp);
 
         SpecParams sp;
-        sp.pos = P.ppos; sp.pj = P.ppj; sp.note = P.pnote; sp.pdr = P.pdr; sp.pwid = P.pwid; sp.ppitch = P.ppitch; sp.freg = P.freg; sp.fcl = P.fcl;
+        sp.pos = P.ppos; sp.pj = P.ppj; sp.note = P.pnote; sp.strict = P.pstrict; sp.pdr = P.pdr; sp.pwid = P.pwid; sp.ppitch = P.ppitch; sp.freg = P.freg; sp.fcl = P.fcl;
         sp.doPad = P.pad > .01f; sp.doFar = P.farLevel > .01f; sp.head = grains.head();
         const bool act = sp.doPad || sp.doFar;
         if (act)
