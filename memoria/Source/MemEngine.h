@@ -56,66 +56,212 @@ struct Params
     bool blur = false;     // размыть всё в облако
     float tone = .48f;     // 0 тёмный … .5 нейтрально … 1 яркий (наклон вокруг 900 Гц)
     float depth = .4f;     // саб-слой на октаву ниже + подъём низа
+    float chaos = 0;       // случайные события: warp, stutter, reverse, tape stop, dropout, shuffle
+    float ruin = 0;        // шумы и разрушение памяти: шипение, треск, эрозия, понижение разрядности
+    int harmony = 0;       // сдвиги слоёв: 0 только октавы (всегда в тональности), 1 + квинты, 2 свободно
+};
+
+inline const char* chaosName (int t)
+{
+    static const char* n[7] = { "", "WARP", "STUTTER", "REVERSE", "TAPE STOP", "DROPOUT", "SHUFFLE" };
+    return n[std::clamp (t, 0, 6)];
+}
+
+// Хаос: случайные события поверх мокрого сигнала (своя короткая память на 4.5 с)
+struct ChaosStage
+{
+    std::vector<float> bl, br;
+    int cap = 1, w = 0;
+    double sr = 48000;
+    float dBase = 200;
+    int type = 0; long t = 0, dur = 0;
+    float m = 0, mAtk = 0, mRel = 0;
+    double start = 0, pos = 0;
+    float stLen = 0, warpDepth = 0, warpPh = 0, warpRate = 0, dropDepth = 1, dropG = 1, dropRate = 0;
+    float wowPh = 0, flPh = 0;
+    int seedOffset = 0;
+    long fired = 0;
+    Rng rng { 0x51ed270bu };
+
+    void prepare (double s)
+    {
+        sr = s;
+        cap = (int) (4.5 * sr);
+        bl.assign ((size_t) cap, 0.0f); br.assign ((size_t) cap, 0.0f);
+        w = 0; type = 0; m = 0; dropG = 1;
+        dBase = (float) (.006 * sr);
+        mAtk = rate (.004, sr); mRel = rate (.0015, sr);
+        dropRate = rate (.004, sr);
+    }
+    float rd (const std::vector<float>& b, double idx) const
+    {
+        while (idx < 0) idx += cap;
+        while (idx >= cap) idx -= cap;
+        const int i0 = (int) idx; const float fr = (float) (idx - i0);
+        const int i1 = i0 + 1 >= cap ? 0 : i0 + 1;
+        return b[(size_t) i0] * (1 - fr) + b[(size_t) i1] * fr;
+    }
+    void trigger()
+    {
+        // веса событий: warp и stutter чаще, shuffle реже
+        static const int T[12] = { 1, 1, 1, 2, 2, 2, 3, 3, 4, 4, 5, 6 };
+        type = T[rng.next() % 12u];
+        t = 0; ++fired;
+        const double now = (double) w - dBase;
+        switch (type)
+        {
+            case 1: dur = (long) ((1.5 + 2.5 * rng.uni()) * sr); warpDepth = (float) ((.004 + .012 * rng.uni()) * sr);
+                    warpRate = (float) (2 * 3.14159265358979 * (.3 + .8 * rng.uni()) / sr); warpPh = 0; break;
+            case 2: stLen = (float) ((.08 + .32 * rng.uni()) * sr); dur = (long) ((.5 + 2.0 * rng.uni()) * sr);
+                    start = now - stLen; pos = 0; break;
+            case 3: dur = (long) ((.4 + .5 * rng.uni()) * sr); start = now; break;
+            case 4: dur = (long) ((.4 + .8 * rng.uni()) * sr); start = now; pos = 0; break;
+            case 5: dur = (long) ((.05 + .35 * rng.uni()) * sr); dropDepth = .05f + .35f * rng.uni(); break;
+            default: dur = (long) (.3 * sr); seedOffset = 1 + (int) (rng.next() % 997u); break;
+        }
+    }
+    void process (float& L, float& R, float chaos)
+    {
+        bl[(size_t) w] = L; br[(size_t) w] = R;
+        wowPh += (float) (2 * 3.14159265358979 * .45 / sr); if (wowPh > 6.2831853f) wowPh -= 6.2831853f;
+        flPh += (float) (2 * 3.14159265358979 * 6.3 / sr);  if (flPh > 6.2831853f) flPh -= 6.2831853f;
+        const float wob = chaos * (float) (.0012 * sr) * (.8f * std::sin (wowPh) + .2f * std::sin (flPh));
+        const double nd = (double) dBase + (double) wob;
+        float oL = rd (bl, (double) w - nd), oR = rd (br, (double) w - nd);
+
+        const float lam = chaos * chaos * .6f;                 // событий в секунду
+        if (type == 0 && chaos > 1e-3f && rng.uni() < lam / (float) sr) trigger();
+
+        float gain = 1;
+        if (type != 0)
+        {
+            ++t;
+            const bool on = t < dur;
+            m += ((on ? 1.0f : 0.0f) - m) * (on ? mAtk : mRel);
+            double idx = (double) w - nd;
+            float win = 1;
+            switch (type)
+            {
+                case 1: warpPh += warpRate; idx = (double) w - nd - warpDepth * (.5 - .5 * std::cos (warpPh)); break;
+                case 2:
+                {
+                    pos += 1; if (pos >= stLen) pos -= stLen;
+                    idx = start + pos;
+                    const float f = (float) (.004 * sr);
+                    win = std::min (1.0f, std::min ((float) pos / f, (stLen - (float) pos) / f));
+                    break;
+                }
+                case 3: idx = start - (double) t; break;
+                case 4: { const double sp = std::max (0.0, 1.0 - (double) t / (double) dur); pos += sp; idx = start + pos; break; }
+                case 5: dropG += ((on ? dropDepth : 1.0f) - dropG) * dropRate; gain = dropG; break;
+                default: break;
+            }
+            if (type >= 1 && type <= 4)
+            {
+                const float eL = rd (bl, idx) * win, eR = rd (br, idx) * win;
+                oL += m * (eL - oL); oR += m * (eR - oR);
+            }
+            if (! on && m < 1e-3f && (type != 5 || dropG > .999f)) { type = 0; m = 0; dropG = 1; }
+        }
+        L = oL * gain; R = oR * gain;
+        if (++w >= cap) w = 0;
+    }
 };
 
 // Характер слоя: полоса частот, сдвиг высоты, текстура
 struct LayerChar { int band = 1; int semis = 0; int tex = 0; };
 inline const char* bandName (int b) { static const char* n[4] = { "DARK", "MID", "BRIGHT", "AIR" }; return n[std::clamp (b, 0, 3)]; }
 inline const char* texName (int t) { static const char* n[4] = { "CLEAN", "TAPE", "FOLD", "CRUSH" }; return n[std::clamp (t, 0, 3)]; }
-inline LayerChar layerChar (int seed, int k)
+inline LayerChar layerChar (int seed, int k, int harmony = 2)
 {
-    static const LayerChar def[4] = { { 0, -12, 1 }, { 1, 0, 0 }, { 2, 12, 0 }, { 3, 7, 1 } };
-    if (seed <= 0) return def[k & 3];
+    harmony = std::clamp (harmony, 0, 2);
+    static const LayerChar def[3][4] = { { { 0, -12, 1 }, { 1, 0, 0 }, { 2, 12, 0 }, { 3, 24, 1 } },
+                                         { { 0, -12, 1 }, { 1, 0, 0 }, { 2, 12, 0 }, { 3, 19, 1 } },
+                                         { { 0, -12, 1 }, { 1, 0, 0 }, { 2, 12, 0 }, { 3, 7, 1 } } };
+    if (seed <= 0) return def[harmony][k & 3];
     Rng r ((uint32_t) seed * 2654435761u + 12345u);
     for (int i = 0; i < 4; ++i) r.next();
     int perm[4] = { 0, 1, 2, 3 };
     for (int i = 3; i > 0; --i) std::swap (perm[i], perm[r.next() % (uint32_t) (i + 1)]);   // полосы всегда разные
     // высота зависит от полосы: тёмный слой держит низ, вверх уходят только яркие
+    // OCT: только октавы — мелодия остаётся в своей тональности при любом наборе
+    static const int OD[6] = { -12, -12, -24, 0, -12, 0 }, OM[6] = { 0, 0, 0, -12, 12, 0 },
+                     OB[6] = { 0, 12, 12, 12, 24, 0 },     OA[6] = { 12, 24, 12, 24, 0, 12 };
+    // 5TH: октавы + квинта (того же звукоряда класс высоты: +7, +19, −5, −17)
+    static const int FD[6] = { -12, -12, -24, 0, -5, -17 }, FM[6] = { 0, 0, -5, 7, -12, 0 },
+                     FB[6] = { 0, 12, 12, 7, 19, 12 },      FA[6] = { 12, 19, 24, 12, 19, 7 };
+    // FREE: любые интервалы, включая кварты
     static const int PD[6] = { -12, -12, -24, 0, -5, -7 };
     static const int PM[6] = { 0, 0, -5, 5, 7, -12 };
     static const int PB[6] = { 0, 12, 12, 7, 19, 5 };
     static const int PA[6] = { 12, 7, 0, 12, 19, 24 };
+    const int* const sets[3][4] = { { OD, OM, OB, OA }, { FD, FM, FB, FA }, { PD, PM, PB, PA } };
     // текстуры: чаще чистая и лента, складка и крош — редкая приправа
     static const int TX[8] = { 0, 0, 0, 1, 1, 1, 2, 3 };
     LayerChar c[4];
     for (int i = 0; i < 4; ++i)
     {
         c[i].band = perm[i];
-        const int* set = perm[i] == 0 ? PD : perm[i] == 1 ? PM : perm[i] == 2 ? PB : PA;
+        const int* set = sets[harmony][perm[i]];
         c[i].semis = set[r.next() % 6u];
         c[i].tex = TX[r.next() % 8u];
     }
     return c[k & 3];
 }
 
-// Сдвиг высоты: две головки задержки со сменным окном
+// Сдвиг высоты (WSOLA): две головки задержки; при перезапуске головка ищет смещение,
+// в котором она совпадает по фазе с соседней — тональный звук сдвигается без призвуков.
 struct Shifter
 {
     std::vector<float> buf;
     int mask = 0, w = 0;
-    float ph = 0, W = 1000;
+    int L = 2880, P = 768, N = 384;         // жизнь головки, поиск фазы (~66 Гц), окно сравнения
+    float d[2] { 2, 2 };
+    int age[2] { 0, 0 };
     void prepare (double sr)
     {
-        W = (float) (.07 * sr);
-        int n = 1; while (n < (int) W + 16) n <<= 1;
-        buf.assign ((size_t) n, 0.0f); mask = n - 1; w = 0; ph = 0;
+        L = (int) (.06 * sr); P = (int) (.016 * sr); N = (int) (.008 * sr);
+        const int need = 3 * L + P + N + 16;   // запас под сдвиг до +24 (ratio 4)
+        int n = 1; while (n < need) n <<= 1;
+        buf.assign ((size_t) n, 0.0f); mask = n - 1; w = 0;
+        age[0] = 0; age[1] = L / 2; d[0] = d[1] = 2;
+    }
+    float at (float delay) const
+    {
+        float pos = (float) w - delay;
+        while (pos < 0) pos += (float) (mask + 1);
+        const int i0 = (int) pos; const float fr = pos - (float) i0;
+        return buf[(size_t) (i0 & mask)] * (1 - fr) + buf[(size_t) ((i0 + 1) & mask)] * fr;
+    }
+    void restart (int i, float ratio)
+    {
+        const float base = ratio > 1 ? 2.0f + (ratio - 1.0f) * (float) L : 2.0f;
+        const float other = d[1 - i];
+        int bestO = 0; double best = -1e30;
+        for (int o = 0; o < P; o += 2)
+        {
+            double c = 0;
+            const int da = (int) (base + (float) o), db = (int) other;
+            for (int j = 0; j < N; j += 2)
+                c += (double) buf[(size_t) ((w - da - j) & mask)] * buf[(size_t) ((w - db - j) & mask)];
+            if (c > best) { best = c; bestO = o; }
+        }
+        d[i] = base + (float) bestO;
+        age[i] = 0;
     }
     float process (float x, float ratio)
     {
         buf[(size_t) w] = x;
-        ph += (1.0f - ratio) / W;
-        ph -= std::floor (ph);
         float y = 0;
-        for (float off : { 0.0f, .5f })
+        for (int i = 0; i < 2; ++i)
         {
-            float p = ph + off; if (p >= 1) p -= 1;
-            const float d = p * W + 2.0f;
-            float pos = (float) w - d;
-            while (pos < 0) pos += (float) (mask + 1);
-            const int i0 = (int) pos; const float fr = pos - (float) i0;
-            const float v = buf[(size_t) (i0 & mask)] * (1 - fr) + buf[(size_t) ((i0 + 1) & mask)] * fr;
-            const float s = std::sin (3.14159265f * p);
-            y += v * s * s;
+            if (age[i] >= L) restart (i, ratio);
+            const float ph = (float) age[i] / (float) L;
+            const float s = std::sin (3.14159265f * ph);
+            y += at (d[i]) * s * s;
+            d[i] += 1.0f - ratio;
+            if (d[i] < 1.0f) d[i] = 1.0f;
+            ++age[i];
         }
         w = (w + 1) & mask;
         return y;
@@ -294,6 +440,10 @@ public:
         dcOut[0] = dcOut[1] = 0;
         k.limAtkOut = rate (.35, sr); k.limRelOut = (float) (1.0 - std::exp (-1.0 / (.25 * sr)));
         subShift.prepare (sr);
+        chaosSt.prepare (sr);
+        for (int c = 0; c < 2; ++c) { pinkB[c][0] = pinkB[c][1] = pinkB[c][2] = 0; crackEnv[c] = 0; crackLp[c] = 0; }
+        k.crackDecay = (float) std::exp (-1.0 / (.00025 * sr));
+        k.crackLp = op (6000);
         subLp1 = subLp2 = 0; shelfLp[0] = shelfLp[1] = 0; tiltLp[0] = tiltLp[1] = 0; outGain = 1;
         k.blur = (float) (1.0 - std::exp (-1.0 / (.4 * sr)));
         k.crushN = std::max (1, (int) std::lround (sr / 12000.0));
@@ -325,7 +475,7 @@ public:
         if (curMode < 0) { rg[0] = rgT[0]; rg[1] = rgT[1]; }
         for (int j = 0; j < 4; ++j)
         {
-            ch[j] = layerChar (p.layerSeed, j);
+            ch[j] = layerChar (chaosSt.seedOffset ? (p.layerSeed + chaosSt.seedOffset) % 1000 + 1 : p.layerSeed, j, p.harmony);
             deg[j].band = ch[j].band;
             ratio[j] = std::pow (2.0f, (float) ch[j].semis / 12.0f);
             static const float ppT[4] = { .31f, .47f, .67f, .89f };
@@ -364,6 +514,8 @@ public:
             sPP += (p.pingpong - sPP) * k.smooth;
             sTone += (p.tone - sTone) * k.smooth;
             sDepth += (p.depth - sDepth) * k.smooth;
+            sChaos += (p.chaos - sChaos) * k.smooth;
+            sRuin += (p.ruin - sRuin) * k.smooth;
             bf += (bfT - bf) * k.blur;
             lcE += (lcT - lcE) * k.enRate;
             hcE += (hcT - hcE) * k.enRate;
@@ -399,6 +551,25 @@ public:
             inPk = std::max (inPk, std::max (std::fabs (dryL), std::fabs (dryR)));
             // размытое облако понемногу дописывается обратно в память
             if (bf > 1e-4f) for (int c = 0; c < 2; ++c) g[c] += bf * .15f * blurPrev[c] * rg[c];
+            // RUIN: шипение и треск записываются в память и стареют вместе с ней
+            float hiss[2] = { 0, 0 };
+            if (sRuin > 1e-4f)
+            {
+                const float r2 = sRuin * sRuin;
+                for (int c = 0; c < 2; ++c)
+                {
+                    const float wn = ruinRng.bi();
+                    float* b = pinkB[c];
+                    b[0] = .99765f * b[0] + wn * .099f; b[1] = .963f * b[1] + wn * .2965f; b[2] = .57f * b[2] + wn * 1.0527f;
+                    hiss[c] = (b[0] + b[1] + b[2] + wn * .1848f) * .08f;
+                    if (ruinRng.uni() < sRuin * 22.0f / (float) sr)
+                        crackAmp[c] = (.05f + .3f * ruinRng.uni()) * sRuin * (ruinRng.uni() < .5f ? -1.0f : 1.0f), crackEnv[c] = 1;
+                    crackEnv[c] *= k.crackDecay;
+                    crackLp[c] += (crackAmp[c] * crackEnv[c] - crackLp[c]) * k.crackLp;
+                    g[c] += (r2 * .03f * hiss[c] + crackLp[c]) * std::max (rg[c], .3f);
+                }
+                if (ruinRng.uni() < r2 * 1.5f / (float) sr) erode();
+            }
 
             float duck[2], fbg[2];
             for (int c = 0; c < 2; ++c)
@@ -423,6 +594,8 @@ public:
             float wl = 0, wr = 0;
             layerStage (wl, wr);
             blurStage (wl, wr);
+            if (sChaos > 1e-4f || chaosSt.type != 0) chaosSt.process (wl, wr, sChaos);
+            if (sRuin > 1e-4f) { const float fl = sRuin * sRuin * .006f; wl += fl * hiss[0]; wr += fl * hiss[1]; }
             depthTone (wl, wr);
             wl *= 2.0f; wr *= 2.0f;   // подъём уровня мокрого сигнала (выходной лимитер держит пики)
 
@@ -455,6 +628,8 @@ public:
         std::array<std::atomic<float>, 4> lfo {};
         std::atomic<float> inLvl { 0 }, outLvl { 0 }, xf { 0 }, blur { 0 }, layers { 0 };
         std::atomic<int> nLayers { 0 };
+        std::atomic<int> chaosType { 0 }, erodeCount { 0 };
+        std::atomic<float> chaosEnv { 0 }, ruin { 0 }, chaos { 0 }, lastErode { -1 };
         std::array<std::atomic<int>, 4> lBand {}, lSemis {}, lTex {};
         std::array<std::atomic<float>, 4> lLvl {};
     } viz;
@@ -463,7 +638,8 @@ private:
     struct LBand { float s1 = 0, s2 = 0, s3 = 0, held = 0; int hold = 0; };
     struct Deg
     {
-        float lp1 = 0, lp2 = 0, env = 0, bloom = 1, lp3 = 0, dc = 0;
+        float lp1 = 0, lp2 = 0, env = 0, bloom = 1, lp3 = 0, dc = 0, held = 0;
+        int hold = 0;
         int band = -1;   // окраска линии внутри петли по характеру слоя
     };
 
@@ -511,9 +687,38 @@ private:
         return d.bloom;
     }
     // запись в линию: лимитер, тепло, мягкое вхождение при переходах
+    // RUIN на высоких значениях: петля теряет разрядность и частоту дискретизации
+    float ruinCrush (Deg& d, float v)
+    {
+        const float rc = std::max (0.0f, (sRuin - .45f) / .55f);
+        if (rc <= 1e-4f) return v;
+        const int N = 1 + (int) (rc * 5.0f * (float) k.crushN / 4.0f);
+        if (++d.hold >= N) { d.hold = 0; const float q = std::pow (2.0f, 11.0f - rc * 6.0f); d.held = std::round (v * q) / q; }
+        return v + rc * .7f * (d.held - v);
+    }
+    // эрозия: случайный кусок памяти выгрызается с мягкими краями
+    void erode()
+    {
+        if (lay.n <= 0) return;
+        const int l = (int) (ruinRng.next() % (uint32_t) lay.n);
+        const int len = lay.len[l];
+        const int seg = std::min (len / 3, (int) ((.02 + .18 * ruinRng.uni()) * sr));
+        if (seg < 8) return;
+        const int p0 = (int) (ruinRng.next() % (uint32_t) len);
+        const float gmin = .1f * ruinRng.uni();
+        for (int j = 0; j < seg; ++j)
+        {
+            const float hw = .5f - .5f * std::cos (6.2831853f * (float) j / (float) seg);
+            at (l, wrap ((p0 + j) % len, len)) *= 1.0f - (1.0f - gmin) * hw;
+        }
+        lastErode = (float) (lay.off[l] + p0);
+        ++erodeCount;
+    }
+
     void writeLine (int line, Deg& d, float v, float wd)
     {
         d.dc += (v - d.dc) * k.dc; v -= d.dc;   // постоянная составляющая не копится в петле
+        v = ruinCrush (d, v);
         v = limitStep (v, d.env, k.limAtk, k.limRel);
         v = warm (v, wd);
         float& cell = at (line, w[line]);
@@ -586,6 +791,7 @@ private:
             const float b = bloomGain (deg[s], g[c] + x, bloomAmt);
             float v = b * (x + g[c]);
             deg[s].dc += (v - deg[s].dc) * k.dc; v -= deg[s].dc;
+            v = ruinCrush (deg[s], v);
             v = limitStep (v, deg[s].env, k.limAtk, k.limRel);
             v = warm (v, wd);
 
@@ -694,7 +900,7 @@ private:
         for (int j = 0; j < ln; ++j)
         {
             float y = lx[j];
-            const float sh = shift[j].process (y, ratio[j]);
+            const float sh = (ch[j].semis != 0 && la > 1e-4f) ? shift[j].process (y, ratio[j]) : y;   // сдвиг только там, где он нужен
             if (la > 1e-4f)
             {
                 if (ch[j].semis != 0)
@@ -726,7 +932,7 @@ private:
     void depthTone (float& wl, float& wr)
     {
         const float mono = .5f * (wl + wr);
-        const float sh = subShift.process (mono, .5f);
+        const float sh = sDepth > 1e-4f ? subShift.process (mono, .5f) : 0.0f;
         subLp1 += (sh - subLp1) * k.sub; subLp2 += (subLp1 - subLp2) * k.sub;
         float x[2] = { wl, wr };
         const float t = (.5f - sTone) * 2.0f;                 // +1 тёмный … −1 яркий
@@ -812,6 +1018,8 @@ private:
         for (int j = 0; j < 4; ++j) viz.lfo[(size_t) j].store (lfo[j].v);
         viz.inLvl.store (inPk); viz.outLvl.store (outPk); viz.xf.store (xf);
         viz.blur.store (bf); viz.layers.store (sLay); viz.nLayers.store (ln);
+        viz.chaosType.store (chaosSt.type); viz.chaosEnv.store (chaosSt.type == 5 ? 1.0f - chaosSt.dropG : chaosSt.m);
+        viz.ruin.store (sRuin); viz.chaos.store (sChaos); viz.lastErode.store (lastErode); viz.erodeCount.store (erodeCount);
         for (int j = 0; j < 4; ++j)
         {
             viz.lBand[(size_t) j].store (ch[j].band); viz.lSemis[(size_t) j].store (ch[j].semis);
@@ -825,6 +1033,7 @@ private:
         float envAtk = 0, envFastRel = 0, envSlowRel = 0, gateUp = 0, gateDown = 0, lfoScale = 1, walk = 0, modM0 = 0, modM1 = 0;
         float b700 = 0, b150 = 0, b2500 = 0, b1500 = 0, b4000 = 0, t1500 = 0, t400 = 0, t1000 = 0, pp = 0, tank = 0, blur = 0;
         float b100 = 0, b3000 = 0, b7000 = 0, b11000 = 0, up = 0, sub = 0, shelf = 0, tilt = 0, limAtkOut = 0, limRelOut = 0, dc = 0, dcOut = 0;
+        float crackDecay = 0, crackLp = 0;
         int crushN = 6;
     } k;
 
@@ -850,7 +1059,15 @@ private:
     LBand lband[4];
     Allpass blurAp[2][6];
     float bf = 0, blurPrev[2] {}, tankLp[2] {};
-    float sLay = 0, sPP = 0, sTone = .48f, sDepth = .4f;
+    float sLay = 0, sPP = 0, sTone = .48f, sDepth = .4f, sChaos = 0, sRuin = 0;
+    ChaosStage chaosSt;
+    Rng ruinRng { 0x7f4a7c15u };
+    float pinkB[2][3] {}, crackEnv[2] {}, crackAmp[2] {}, crackLp[2] {};
+    float lastErode = -1; int erodeCount = 0;
+public:
+    long chaosEvents() const { return chaosSt.fired; }
+    int erosions() const { return erodeCount; }
+private:
     Shifter subShift;
     float subLp1 = 0, subLp2 = 0, shelfLp[2] {}, tiltLp[2] {}, outGain = 1, dcOut[2] {};
 

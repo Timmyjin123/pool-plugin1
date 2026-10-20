@@ -381,6 +381,44 @@ void MemoryRing::paint (juce::Graphics& g)
         }
     }
 
+    // руины: пыль и шум вокруг кольца, вспышка эрозии
+    const float ru = v.ruin.load();
+    if (ru > .01f)
+    {
+        juce::Random rr ((juce::int64) (t * 30));
+        const int nDots = (int) (ru * 140);
+        for (int i = 0; i < nDots; ++i)
+        {
+            const float ang = rr.nextFloat() * kTau, rad = R * (.55f + rr.nextFloat() * 1.2f);
+            g.setColour (juce::Colours::white.withAlpha (.08f + .25f * ru * rr.nextFloat()));
+            g.fillRect (cx + std::cos (ang) * rad, cy + std::sin (ang) * rad, 1.4f, 1.4f);
+        }
+        const int ec = v.erodeCount.load();
+        if (ec != lastErodeSeen) { lastErodeSeen = ec; erodeFlash = 1; erodePos = v.lastErode.load(); }
+        if (erodeFlash > .01f && erodePos >= 0 && total > 0)
+        {
+            // найти линию и угол места эрозии
+            const float gap = n > 1 ? .07f : 0.0f, avail = kTau - gap * (float) n;
+            float a = -kPi * .5f + rot + gap * .5f;
+            for (int l = 0; l < n; ++l)
+            {
+                const int off = v.off[(size_t) l].load(), len = v.len[(size_t) l].load();
+                const float span = avail * (float) len / (float) total;
+                if (erodePos >= (float) off && erodePos < (float) (off + len))
+                {
+                    const float ang = a + span * (erodePos - (float) off) / (float) len;
+                    juce::Path arc;
+                    arc.addCentredArc (cx, cy, R + 20, R + 20, 0, ang + kPi * .5f - .05f, ang + kPi * .5f + .05f, true);
+                    g.setColour (Pal::warn().withAlpha (.8f * erodeFlash));
+                    g.strokePath (arc, juce::PathStrokeType (10.0f));
+                    break;
+                }
+                a += span + gap;
+            }
+            erodeFlash *= .9f;
+        }
+    }
+
     // ядро
     const float core = 40 + juce::jmin (1.0f, lvl) * 10;
     for (int i = 3; i >= 1; --i)
@@ -414,7 +452,21 @@ void MemoryRing::paint (juce::Graphics& g)
     float by = 24;
     if (frozen) { badge ("FROZEN", Pal::ice(), by); by += 28; }
     if (v.dir.load() < 0) { badge (U ("◂ REVERSE"), acc, by); by += 28; }
-    if (bl > .5f) badge ("BLUR", Pal::blur(), by);
+    if (bl > .5f) { badge ("BLUR", Pal::blur(), by); by += 28; }
+    // событие хаоса — вспышка над кольцом
+    {
+        const int ct = v.chaosType.load();
+        const float ce = v.chaosEnv.load();
+        if (ct > 0 && ce > .02f)
+        {
+            const auto cc = Pal::warn().interpolatedWith (juce::Colours::white, .2f);
+            const auto r = juce::Rectangle<float> (130, 24).withCentre ({ cx, 18 });
+            g.setColour (cc.withAlpha (.15f * ce)); g.fillRoundedRectangle (r, 12);
+            g.setColour (cc.withAlpha (ce)); g.drawRoundedRectangle (r, 12, 1.2f);
+            g.setFont (F (11.5f, true, .2f));
+            g.drawText (mem::chaosName (ct), r, juce::Justification::centred);
+        }
+    }
 
     // уровни входа и выхода
     auto meter = [&] (float x, float level, const juce::String& name)
@@ -437,12 +489,15 @@ void MemoryRing::paint (juce::Graphics& g)
 MemoriaEditor::MemoriaEditor (MemoriaProcessor& p)
     : AudioProcessorEditor (p), proc (p), ring (p), layerPanel (p),
       modeSeg (p, "mode", { "GRAINS", "DIFFUSE", "NETWORK", "TAPES" }, true),
-      sizeSeg (p, "size", { "LONG", "MID", "SHORT" }, false)
+      sizeSeg (p, "size", { "LONG", "MID", "SHORT" }, false),
+      harmSeg (p, "harmony", { "OCT", "5TH", "FREE" }, false)
 {
     setLookAndFeel (&look);
     addAndMakeVisible (ring);
     addAndMakeVisible (modeSeg);
     addAndMakeVisible (sizeSeg);
+    addAndMakeVisible (harmSeg);
+    harmSeg.setTooltip (U ("Гармония слоёв. OCT — только октавы, всегда в тональности. 5TH — плюс квинта, одна нота лада может уйти. FREE — любые интервалы, включая кварты."));
     modeSeg.setTooltip (U ("Режим: гранулы над петлёй · кольцо дрейфующих allpass · сеть из 4 линий · две ленты неравной длины"));
     sizeSeg.setTooltip (U ("Размер памяти: длинные, средние или короткие петли"));
 
@@ -450,7 +505,7 @@ MemoriaEditor::MemoriaEditor (MemoriaProcessor& p)
     for (auto k : { K { "decay", "DECAY", false }, K { "warmth", "WARMTH", false }, K { "dynamics", "DYNAMICS", true },
                     K { "spread", "SPREAD", false }, K { "drift", "DRIFT", false }, K { "layers", "LAYERS", false },
                     K { "pingpong", "PING-PONG", false }, K { "mix", "MIX", false }, K { "output", "OUTPUT", false },
-                    K { "tone", "TONE", true }, K { "depth", "DEPTH", false } })
+                    K { "tone", "TONE", true }, K { "depth", "DEPTH", false }, K { "chaos", "CHAOS", false }, K { "ruin", "RUIN", false } })
         addAndMakeVisible (knobs.add (new Knob (p, k.id, k.title, k.bip)));
     knobs[2]->setTooltip (U ("Влево — память приглушается, пока играешь, и наплывает, когда перестаёшь. Вправо — тихие хвосты распускаются в ровный дрон."));
     knobs[3]->setTooltip (U ("Grains — разброс позиций гранул. Network и Tapes — сколько звука перетекает между линиями."));
@@ -459,6 +514,8 @@ MemoriaEditor::MemoriaEditor (MemoriaProcessor& p)
     knobs[6]->setTooltip (U ("Пинг-понг: у каждого слоя своя задержка, эхо прыгает между левым и правым каналом."));
     knobs[9]->setTooltip (U ("Тон мокрого сигнала: влево темнее и мягче, вправо ярче."));
     knobs[10]->setTooltip (U ("Глубина: саб-слой на октаву ниже и подъём низа."));
+    knobs[11]->setTooltip (U ("Хаос: иногда вмешиваются случайные сбои — звук плывёт, заикается, играет назад, останавливается как плёнка, проваливается, слои перетасовываются."));
+    knobs[12]->setTooltip (U ("Руины: шипение и треск записываются в память и стареют вместе с ней, куски памяти выветриваются, выше — петля теряет разрядность."));
 
     const auto modeC = Pal::mode (0);
     addAndMakeVisible (chips.add (new Chip (p, "lowcut", "LO-CUT", Chip::Cycle, modeC)));
@@ -500,6 +557,7 @@ void MemoriaEditor::timerCallback()
         const auto c = Pal::mode (m);
         for (auto* k : knobs) k->setAccent (c);
         sizeSeg.setAccent (c);
+        harmSeg.setAccent (c);
         for (int i : { 0, 1, 2, 4, 6, 7 }) chips[i]->setAccent (c);
         repaint();
     }
@@ -534,10 +592,14 @@ void MemoriaEditor::resized()
     ring.setBounds (0, 100, W, 300);
 
     layerPanel.setBounds (W - 268, 156, 214, 4 * 48);
+    harmSeg.setBounds (W - 268, 116, 214, 30);
     const int nb = 9, kw = 100, kx = (W - kw * nb) / 2;
     for (int i = 0; i < nb; ++i) knobs[i]->setBounds (kx + i * kw, 416, kw, 100);
-    knobs[9]->setBounds (64, 196, 96, 96);     // TONE и DEPTH — слева от кольца
-    knobs[10]->setBounds (64, 296, 96, 96);
+    // слева от кольца: TONE · DEPTH / CHAOS · RUIN
+    knobs[9]->setBounds (52, 196, 92, 96);
+    knobs[10]->setBounds (148, 196, 92, 96);
+    knobs[11]->setBounds (52, 300, 92, 96);
+    knobs[12]->setBounds (148, 300, 92, 96);
 
     const int cw = 98, cg = 6, cx = (W - cw * chips.size() - cg * (chips.size() - 1)) / 2;
     for (int i = 0; i < chips.size(); ++i) chips[i]->setBounds (cx + i * (cw + cg), 540, cw, 32);

@@ -47,6 +47,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout MemoriaProcessor::makeLayout
             return v < .5f ? U ("темнее ") + String (roundToInt ((.5f - v) * 200)) + "%" : U ("ярче ") + String (roundToInt ((v - .5f) * 200)) + "%";
         })));
     f01 ("depth", "Глубина: саб на октаву ниже и низ", .4f);
+    f01 ("chaos", "Хаос: случайные сбои (warp, stutter, reverse, tape stop, dropout, shuffle)", 0);
+    f01 ("ruin", "Руины: шипение, треск, эрозия памяти", 0);
+    ps.push_back (std::make_unique<AudioParameterChoice> (ParameterID { "harmony", 1 }, U ("Гармония слоёв: октавы / квинты / свободно"),
+                                                          StringArray { "OCT", "5TH", "FREE" }, 0));
     return { ps.begin(), ps.end() };
 }
 
@@ -100,6 +104,9 @@ void MemoriaProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBu
     p.blur = val ("blur") > .5f;
     p.tone = val ("tone");
     p.depth = val ("depth");
+    p.chaos = val ("chaos");
+    p.ruin = val ("ruin");
+    p.harmony = (int) val ("harmony");
 
     float* l = buf.getWritePointer (0);
     float* r = buf.getWritePointer (1);
@@ -124,6 +131,7 @@ void MemoriaProcessor::setCurrentProgram (int i)
     set ("lowcut", (float) pr.lowcut); set ("highcut", (float) pr.highcut);
     set ("layers", pr.layers); set ("layerSeed", (float) pr.seed); set ("pingpong", pr.pingpong); set ("blur", pr.blur ? 1.0f : 0.0f);
     set ("tone", pr.tone); set ("depth", pr.depth); set ("reverse", pr.reverse ? 1.0f : 0.0f);
+    set ("chaos", pr.chaos); set ("ruin", pr.ruin); set ("harmony", (float) pr.harmony);
 }
 
 void MemoriaProcessor::diceLayers()

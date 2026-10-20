@@ -125,6 +125,57 @@ int main()
         CHECK (on440 > off440 * 3, "октава вниз появляется в спектре");
     }
 
+    std::printf ("== CHAOS и RUIN на максимуме\n");
+    for (int m = 0; m < 4; ++m)
+    {
+        Run r (sr);
+        r.p.mode = m; r.p.size = 1; r.p.mix = 1; r.p.decay = .9f; r.p.layers = .8f; r.p.pingpong = .5f; r.p.blur = (m % 2) == 1;
+        r.p.chaos = 1; r.p.ruin = 1;
+        const auto t0 = std::chrono::steady_clock::now();
+        const double a = r.run (25, 1);
+        const double t = r.run (10, 0);
+        const double secs = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+        char buf[200];
+        std::snprintf (buf, sizeof buf, "%s: без NaN, пик <= 0 дБ (rms %.3f / %.3f, пик %.3f, событий %ld, эрозий %d, cpu %.1f%%)",
+                       modeName (m), a, t, r.peak, r.e.chaosEvents(), r.e.erosions(), secs / 35.0 * 100);
+        CHECK (! r.nan && r.peak <= 1.0f, buf);
+        CHECK (r.e.chaosEvents() >= 8, "хаос: события случаются (≥ 8 за 35 с)");
+        CHECK (r.e.erosions() >= 10, "руины: эрозия работает");
+    }
+    {
+        Run r (sr); r.p.mode = 2; r.p.size = 2; r.p.mix = 1; r.p.decay = .85f; r.p.ruin = .8f;
+        const double quiet = r.run (12, 0);
+        std::printf ("  ruin .8 без входа: rms %.4f\n", quiet);
+        CHECK (quiet > .002 && quiet < .2, "руины: шум и треск копятся в памяти даже без входа, но не разгоняются");
+        Run z (sr); z.p.mode = 2; z.p.mix = 1; z.p.chaos = 0; z.p.ruin = 0;
+        const double zero = z.run (6, 0);
+        CHECK (zero < 1e-6, "при CHAOS = 0 и RUIN = 0 тишина остаётся тишиной");
+    }
+
+    std::printf ("== HARMONY: в режиме OCT слои не уводят из тональности\n");
+    {
+        // вход — ля (220 Гц) с тихим шумом
+        auto pcEnergy = [&] (int harmony, int seed, double& inKey, double& off)
+        {
+            Run r (sr); r.p.mode = 2; r.p.size = 2; r.p.mix = 1; r.p.decay = .5f; r.p.warmth = 0; r.p.highcut = 0; r.p.lowcut = 0;
+            r.p.layers = 1; r.p.layerSeed = seed; r.p.harmony = harmony; r.p.depth = 0; r.p.pingpong = 0;
+            std::vector<float> cap; r.run (5, 1); r.run (3, 1, &cap);
+            auto en = [&] (double f) { double re = 0, im = 0; for (size_t i = 0; i < cap.size(); ++i) { const double w = 2 * M_PI * f * (double) i / sr; re += cap[i] * std::cos (w); im += cap[i] * std::sin (w); } return std::sqrt (re * re + im * im) / (double) cap.size(); };
+            inKey = en (110) + en (220) + en (440) + en (880);
+            // чужие для ля классы высоты (не её натуральные обертоны): ре, соль, фа, соль-диез, си-бемоль
+            off = en (146.83) + en (293.66) + en (587.33) + en (196.0) + en (392.0) + en (174.61) + en (349.23) + en (207.65) + en (415.30) + en (233.08) + en (466.16);
+        };
+        double worst = 0, freeWorst = 0;
+        for (int seed : { 0, 9, 31, 42, 51, 101, 222, 404, 666, 999 })
+        {
+            double ik, of; pcEnergy (0, seed, ik, of); worst = std::max (worst, of / ik);
+            pcEnergy (2, seed, ik, of); freeWorst = std::max (freeWorst, of / ik);
+        }
+        std::printf ("  доля чужих нот: OCT %.3f, FREE %.3f\n", worst, freeWorst);
+        CHECK (worst < .05, "OCT: чужие ноты не появляются ни на одном наборе");
+        CHECK (freeWorst > worst * 3, "FREE действительно добавляет другие интервалы (проверка теста)");
+    }
+
     std::printf ("== decay = 0: память быстро гаснет\n");
     {
         Run r (sr); r.p.mode = 3; r.p.size = 2; r.p.mix = 1; r.p.decay = 0; r.p.highcut = 0;

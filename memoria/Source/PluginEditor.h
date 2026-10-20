@@ -115,6 +115,8 @@ private:
     std::array<int, kBins> lineOf {};
     int nBins = 0;
     float rot = 0, lvl = 0, inLvl = 0, t = 0;
+    int lastErodeSeen = 0;
+    float erodeFlash = 0, erodePos = -1;
     struct Star { float x, y, s, a, tw; };
     std::vector<Star> stars;
 };
@@ -145,7 +147,7 @@ private:
     mui::Look look;
     MemoryRing ring;
     LayerPanel layerPanel;
-    Segments modeSeg, sizeSeg;
+    Segments modeSeg, sizeSeg, harmSeg;
     juce::OwnedArray<Knob> knobs;
     juce::OwnedArray<Chip> chips;
     juce::ComboBox presetBox;
