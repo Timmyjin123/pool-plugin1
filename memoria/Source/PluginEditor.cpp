@@ -504,11 +504,13 @@ void MemoryRing::paint (juce::Graphics& g)
         if (ct > 0 && ce > .02f)
         {
             const auto cc = Pal::warn().interpolatedWith (juce::Colours::white, .2f);
-            const auto r = juce::Rectangle<float> (130, 24).withCentre ({ cx, 18 });
+            const int cb = v.chaosBand.load();
+            const juce::String bn = mem::bandMaskName (cb);
+            const auto r = juce::Rectangle<float> (bn.isEmpty() ? 130.0f : 190.0f, 24).withCentre ({ cx, 18 });
             g.setColour (cc.withAlpha (.15f * ce)); g.fillRoundedRectangle (r, 12);
             g.setColour (cc.withAlpha (ce)); g.drawRoundedRectangle (r, 12, 1.2f);
             g.setFont (F (11.5f, true, .2f));
-            g.drawText (mem::chaosName (ct), r, juce::Justification::centred);
+            g.drawText (juce::String (mem::chaosName (ct)) + (bn.isEmpty() ? juce::String() : U (" · ") + bn), r, juce::Justification::centred);
         }
     }
 
@@ -683,16 +685,23 @@ void LayerPanel::paint (juce::Graphics& g)
         const int semis = v.lSemis[(size_t) j].load();
         const int band = v.lBand[(size_t) j].load(), tex = v.lTex[(size_t) j].load();
         const float lvl = juce::jmin (1.0f, std::sqrt (v.lLvl[(size_t) j].load() * 6));
-        g.setColour (col.withAlpha (act));
-        g.fillEllipse (juce::Rectangle<float> (8, 8).withCentre ({ r.getX() + 14, r.getY() + 14 }));
+        const int dist = v.lDist[(size_t) j].load();
+        // точка слоя: ближний — сплошная, дальний — полое кольцо (чем дальше, тем тоньше и прозрачнее)
+        {
+            const auto dot = juce::Rectangle<float> (8, 8).withCentre ({ r.getX() + 14, r.getY() + 14 });
+            if (dist == 0) { g.setColour (col.withAlpha (act)); g.fillEllipse (dot); }
+            else { g.setColour (col.withAlpha (act * (1.0f - .18f * (float) dist))); g.fillEllipse (dot.reduced (1.5f * (float) dist)); g.drawEllipse (dot, .8f); }
+        }
         g.setColour (Pal::text().withAlpha (.4f + .6f * act));
         g.setFont (F (11, true, .14f));
         g.drawText ("LAYER " + juce::String (j + 1), r.withTrimmedLeft (26).withHeight (26), juce::Justification::centredLeft);
+        g.setColour (Pal::dim().withAlpha (.8f)); g.setFont (F (9, true, .16f));
+        g.drawText (mem::distName (dist), r.withTrimmedLeft (98).withHeight (26), juce::Justification::centredLeft);
         g.setColour (Pal::dim());
         g.setFont (F (10.5f, false, .1f));
         const float sw = v.lSwell[(size_t) j].load();
         g.drawText (juce::String (mem::bandName (band)) + U (" · ") + mem::texName (tex) + (sw > .05f ? U (" · SWELL ") + juce::String (sw, 1) + "s" : juce::String()),
-                    r.withTrimmedLeft (26).withTrimmedTop (20).withHeight (16), juce::Justification::centredLeft);
+                    r.withTrimmedLeft (26).withTrimmedRight (60).withTrimmedTop (20).withHeight (16), juce::Justification::centredLeft, true);
         g.setColour (col.withAlpha (act));
         g.setFont (F (17, true));
         const juce::String st = semis == 0 ? U ("±0") : (semis > 0 ? "+" + juce::String (semis) : U ("−") + juce::String (-semis));
