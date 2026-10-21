@@ -508,16 +508,24 @@ struct PingPong
 {
     std::vector<float> l, r;
     int cap = 1, len = 1, w = 0;
+    float lenF = -1;   // время задержки скользит к len (смена SIZE — мягкий проезд, без щелчка)
     float lpL = 0, lpR = 0;
-    void prepare (double sr) { cap = (int) (1.0 * sr) + 4; l.assign ((size_t) cap, 0.0f); r.assign ((size_t) cap, 0.0f); w = 0; lpL = lpR = 0; }
+    void prepare (double sr) { cap = (int) (1.0 * sr) + 4; l.assign ((size_t) cap, 0.0f); r.assign ((size_t) cap, 0.0f); w = 0; lpL = lpR = 0; lenF = -1; }
+    float rd (const std::vector<float>& b, float d) const
+    {
+        float pos = (float) w - d; while (pos < 0) pos += (float) cap;
+        int i0 = (int) pos; const float fr = pos - (float) i0; if (i0 >= cap) i0 -= cap; const int i1 = i0 + 1 >= cap ? 0 : i0 + 1;
+        return b[(size_t) i0] * (1 - fr) + b[(size_t) i1] * fr;
+    }
     void process (float in, float fb, float lpA, bool startRight, float& oL, float& oR)
     {
-        if (w >= len) w = 0;
-        const float a = l[(size_t) w], b = r[(size_t) w];
+        if (lenF < 0) lenF = (float) len;
+        lenF += std::clamp ((float) len - lenF, -.05f, .05f);
+        const float a = rd (l, lenF), b = rd (r, lenF);
         lpL += (a - lpL) * lpA; lpR += (b - lpR) * lpA;
         l[(size_t) w] = (startRight ? 0.0f : in) + fb * lpR;
         r[(size_t) w] = (startRight ? in : 0.0f) + fb * lpL;
-        if (++w >= len) w = 0;
+        if (++w >= cap) w = 0;
         oL = a; oR = b;
     }
 };
@@ -545,7 +553,7 @@ struct Reverb
     int len[NL] {}, cap[NL] {}, w[NL] {};
     float lenF[NL] {};   // фактическая длина: плавно скользит к len, без скачков
     float lpD[NL] {}, lpL[NL] {}, modPh[NL] {}, modInc[NL] {};
-    float g[NL] {}, gLow[NL] {};
+    float g[NL] {}, gLow[NL] {}, gS[NL] {}, gLS[NL] {}, preS = -1;
     std::vector<float> pre[2]; int preCap = 1, preW = 0;
     Allpass diff[2][4];
     Shifter shim;
@@ -561,7 +569,7 @@ struct Reverb
         static const double base[NL] = { 41.3, 53.9, 61.7, 73.1, 84.7, 97.3, 109.9, 127.1 };
         for (int i = 0; i < NL; ++i)
         {
-            cap[i] = (int) (base[i] * 2.3 * .001 * sr) + 64;
+            cap[i] = (int) (base[i] * 2.3 * .001 * sr) + (int) (.0015 * sr) + 64;
             line[i].assign ((size_t) cap[i], 0.0f);
             w[i] = 0; lpD[i] = lpL[i] = 0;
             modPh[i] = (float) i * .7f;
@@ -580,7 +588,7 @@ struct Reverb
         auto op = [this] (double fc) { return (float) (1.0 - std::exp (-2.0 * 3.14159265358979 * fc / sr)); };
         aLow = op (250); aShim = op (7000); aShimPre = op (4500);
         aGuardAtk = (float) (1.0 - std::exp (-1.0 / (.002 * sr))); aGuardRel = (float) (1.0 - std::exp (-1.0 / (.6 * sr)));
-        envG = 0; guard = 1;
+        envG = 0; guard = 1; preS = -1;
         shimPre1 = shimPre2 = shimLp2 = 0;
         modDepth = (float) (.0006 * sr);
         lastRt = lastSize = -1;
@@ -592,12 +600,12 @@ struct Reverb
             static const double base[NL] = { 41.3, 53.9, 61.7, 73.1, 84.7, 97.3, 109.9, 127.1 };
             for (int i = 0; i < NL; ++i)
             {
-                len[i] = std::min (cap[i] - (int) modDepth - 8, (int) (base[i] * size * .001 * sr));
+                len[i] = std::min (cap[i] - 2 * (int) modDepth - 8, (int) (base[i] * size * .001 * sr));   // модуляция качает до 2×modDepth: чтение не залезает в только что записанное
                 const double t = (double) len[i] / sr;
                 g[i] = (float) std::pow (10.0, -3.0 * t / rt);
                 gLow[i] = (float) std::pow (10.0, -3.0 * t / (rt * 1.5));   // низ звучит в полтора раза дольше
             }
-            if (lastRt < 0) for (int i = 0; i < NL; ++i) lenF[i] = (float) len[i];
+            if (lastRt < 0) for (int i = 0; i < NL; ++i) { lenF[i] = (float) len[i]; gS[i] = g[i]; gLS[i] = gLow[i]; }
             lastRt = rt; lastSize = size;
         }
         aDamp = (float) (1.0 - std::exp (-2.0 * 3.14159265358979 * damp / sr));
@@ -606,7 +614,8 @@ struct Reverb
     {
         float pos = (float) w[i] - delay;
         while (pos < 0) pos += (float) cap[i];
-        const int i0 = (int) pos; const float fr = pos - (float) i0;
+        int i0 = (int) pos; const float fr = pos - (float) i0;
+        if (i0 >= cap[i]) i0 -= cap[i];   // −0.00001 + cap округляется до cap: без этого чтение уходит за буфер (щелчок)
         const int i1 = i0 + 1 >= cap[i] ? 0 : i0 + 1;
         return line[i][(size_t) i0] * (1 - fr) + line[i][(size_t) i1] * fr;
     }
@@ -614,8 +623,11 @@ struct Reverb
     void process (float inL, float inR, float preDelay, float shimmer, float shimRatio, float& oL, float& oR)
     {
         pre[0][(size_t) preW] = inL; pre[1][(size_t) preW] = inR;
-        int rp = preW - (int) preDelay; if (rp < 0) rp += preCap;
-        float x[2] = { pre[0][(size_t) rp], pre[1][(size_t) rp] };
+        if (preS < 0) preS = preDelay;
+        preS += std::clamp (preDelay - preS, -.05f, .05f);   // предзадержка скользит, без пропуска сэмплов
+        float pp = (float) preW - preS; while (pp < 0) pp += (float) preCap;
+        int p0 = (int) pp; const float pf = pp - (float) p0; if (p0 >= preCap) p0 -= preCap; const int p1 = p0 + 1 >= preCap ? 0 : p0 + 1;
+        float x[2] = { pre[0][(size_t) p0] * (1 - pf) + pre[0][(size_t) p1] * pf, pre[1][(size_t) p0] * (1 - pf) + pre[1][(size_t) p1] * pf };
         if (++preW >= preCap) preW = 0;
         for (int c = 0; c < 2; ++c) for (auto& d : diff[c]) x[c] = d.process (x[c], .62f);
 
@@ -657,7 +669,8 @@ struct Reverb
             float y = h[i] * nrm;
             lpL[i] += (y - lpL[i]) * aLow;                         // низ
             lpD[i] += (y - lpD[i]) * aDamp;                        // верх гаснет быстрее
-            y = ((lpD[i] - lpL[i]) * g[i] + lpL[i] * gLow[i]) * guard * shimDecay;
+            gS[i] += (g[i] - gS[i]) * .0005f; gLS[i] += (gLow[i] - gLS[i]) * .0005f;   // затухание меняется плавно
+            y = ((lpD[i] - lpL[i]) * gS[i] + lpL[i] * gLS[i]) * guard * shimDecay;
             y += (i & 1 ? x[1] : x[0]) * .5f + sh * (i < 4 ? 1.0f : -1.0f) * .5f;
             if (y > 1.5f) y = 1.5f + std::tanh (y - 1.5f); else if (y < -1.5f) y = -1.5f + std::tanh (y + 1.5f);   // предохранитель
             line[i][(size_t) w[i]] = y;
@@ -873,7 +886,7 @@ public:
         subShift.prepare (sr, .10, .026, .012);     // бас: длинное окно, поиск фазы до ~38 Гц
         subShift2.prepare (sr, .12, .030, .014);
         k.bass = op (400); k.sub2 = op (90); k.monoLo = op (120);
-        k.cl300 = op (300); k.cl3000 = op (3000); k.apLow = op (160); k.playMemDn = (float) (1.0 / (12.0 * sr));
+        k.cl300 = op (300); k.cl3000 = op (3000); k.apLow = op (160); k.glSm = (float) (1.0 - std::exp (-1.0 / (.003 * sr))); k.playMemDn = (float) (1.0 / (12.0 * sr));
         k.bx[0] = op (250); k.bx[1] = op (800); k.bx[2] = op (2500); k.bx[3] = op (6000);
         k.balE = (float) (1.0 / (2.5 * sr)); k.balG = (float) (1.0 / (1.5 * sr));
         k.glDet = (float) (1.0 / (.012 * sr)); k.glAtk = (float) (1.0 / (.018 * sr)); k.glRel = (float) (1.0 / (.32 * sr)); k.glHp = op (120); k.glAvg = (float) (1.0 / (3.0 * sr));
@@ -1046,7 +1059,12 @@ public:
                     // мягкий верх: SVF 12 дБ/окт + пологая полка заранее; бока темнее середины (глубина)
                     const float fh = std::min (fHi, 20000.0f), nyq = (float) sr * .45f;
                     auto tg = [this, nyq] (float f) { return (float) std::tan (3.14159265358979 * std::min (f, nyq) / sr); };
-                    hiGM = tg (fh); hiGS = tg (fh * .72f); hiShA = op1 (fh * .4f);
+                    hiGM = tg (fh * 2.2f); hiGS = tg (fh * 1.6f); hiShA = op1 (fh * .4f); hiOpT = op1 (fh); hiOpST = op1 (fh * .72f);
+                    // характер ручки TAIL: чем ниже верхний срез — тем теплее и гуще перегруз (лента → лампа → складка);
+                    // чем выше нижний срез — тем больше «радио»: зерно и потеря разрядности
+                    // характер следует только за точками ручки (не за автоматическим дрейфом срезов)
+                    tDrHT = tailHiOff ? 0.0f : std::clamp (std::log2 (16000.0f / std::max (200.0f, tailHiBase)) / 4.5f, 0.0f, 1.0f);
+                    tDrLT = tailLoOff ? 0.0f : std::clamp (std::log2 (std::max (1.0f, tailLoBase) / 90.0f) / 4.0f, 0.0f, 1.0f);
                     const float lowness = std::clamp (std::log2 (16000.0f / std::max (200.0f, fh)) / 5.0f, 0.0f, 1.0f);
                     hiK = 1.0f / (.55f + .45f * lowness);   // ниже срез — чуть больше тёплого «вокального» подъёма у среза
                     hiAmtT = tHiA >= 1.0f ? 0.0f : 1.0f;
@@ -1056,6 +1074,7 @@ public:
                 const float hs = k.smooth * 4;
                 sHiGM += (hiGM - sHiGM) * hs; sHiGS += (hiGS - sHiGS) * hs; sHiSh += (hiShA - sHiSh) * hs;
                 sHiK += (hiK - sHiK) * hs; hiAmt += (hiAmtT - hiAmt) * hs;
+                hiOp += (hiOpT - hiOp) * hs; hiOpS += (hiOpST - hiOpS) * hs; tDrH += (tDrHT - tDrH) * hs * .25f; tDrL += (tDrLT - tDrL) * hs * .25f;
             }
             bf += (bfT - bf) * k.blur;
             lcE += (lcT - lcE) * k.enRate;
@@ -1188,13 +1207,14 @@ public:
             organism.process (wl, wr, orgSel, playF, .5f * (dryL + dryR));
             balance (wl, wr);
             depthTone (wl, wr, .5f * (dryL + dryR));
-            // TAIL: фильтр хвостов, 24 дБ/окт снизу и сверху
+            // TAIL: характер хвоста — перегруз по положению точек, потом мягкие срезы (низ 12 дБ/окт, верх — пологий)
             {
                 float x[2] = { wl, wr };
+                tailDrive (x);
                 for (int c = 0; c < 2; ++c)
                 {
                     float h = x[c];
-                    for (int j = 0; j < 4; ++j) { tf[c][j] += (h - tf[c][j]) * sTLo; h -= tf[c][j]; }
+                    for (int j = 0; j < 2; ++j) { tf[c][j] += (h - tf[c][j]) * sTLo; h -= tf[c][j]; }
                     x[c] = h;
                 }
                 // верх в Mid/Side: пологая полка (−3 дБ) с октавы ниже среза, дальше 12 дБ/окт без резкого колена
@@ -1203,7 +1223,8 @@ public:
                 if (hiAmt > 1e-4f)
                 {
                     hiSh[0] += (m - hiSh[0]) * sHiSh; hiSh[1] += (sd - hiSh[1]) * sHiSh;
-                    const float m1 = m - .4f * (m - hiSh[0]), s1 = sd - .5f * (sd - hiSh[1]);
+                    hiP[0] += (m - hiP[0]) * hiOp; hiP[1] += (sd - hiP[1]) * hiOpS;   // 6 дБ/окт у самого среза — колено мягкое
+                    const float m1 = hiP[0] - .4f * (m - hiSh[0]), s1 = hiP[1] - .5f * (sd - hiSh[1]);
                     mm = m + hiAmt * (hiSvf[0].lp (m1, sHiGM, sHiK) - m);
                     ss = sd + hiAmt * (hiSvf[1].lp (s1, sHiGS, sHiK) - sd);
                 }
@@ -1222,18 +1243,19 @@ public:
                 wl *= agcG; wr *= agcG;
             }
 
-            float oL = wl * sMix + dryL * (1 - sMix);
-            float oR = wr * sMix + dryR * (1 - sMix);
+            // OUTPUT и тепло — только для обработанного звука; сухой сигнал проходит как есть (громкость не «качается»)
+            const float wn = (1 + wd) * (1 - .3f * wd);
+            float eL = warm (wl * sMix * sOut, wd) / wn, eR = warm (wr * sMix * sOut, wd) / wn;
+            // плавный лимитер только на мокром: его пики уменьшают громкость эффекта, сухой не трогается
+            const float pk = std::max (std::fabs (eL), std::fabs (eR));
+            const float tgt = pk > .8f ? .8f / pk : 1.0f;
+            outGain += (tgt - outGain) * (tgt < outGain ? k.limAtkOut : k.limRelOut);
+            float oL = eL * outGain + dryL * (1 - sMix);
+            float oR = eR * outGain + dryR * (1 - sMix);
             monoAmt += ((p.mono ? 1.0f : 0.0f) - monoAmt) * k.smooth;
             if (monoAmt > 1e-4f) { const float m = (oL + oR) * .5f; oL += monoAmt * (m - oL); oR += monoAmt * (m - oR); }
-            oL = warm (oL, wd) * sOut;
-            oR = warm (oR, wd) * sOut;
-            // плавный лимитер: пики уменьшают громкость, а не искажаются
-            const float pk = std::max (std::fabs (oL), std::fabs (oR));
-            const float tgt = pk > .84f ? .84f / pk : 1.0f;
-            outGain += (tgt - outGain) * (tgt < outGain ? k.limAtkOut : k.limRelOut);
-            oL = softClip (oL * outGain);
-            oR = softClip (oR * outGain);
+            oL = softClip (oL); oR = softClip (oR);   // предохранитель: ниже 0.9 не трогает ничего
+            if (! (std::fabs (oL) < 4.0f)) oL = 0; if (! (std::fabs (oR) < 4.0f)) oR = 0;   // на всякий случай: NaN/inf не уходят в хост
             outL[i] = oL;
             outR[i] = oR;
             outPk = std::max (outPk, std::max (std::fabs (oL), std::fabs (oR)));
@@ -1677,7 +1699,7 @@ private:
                     q.pre += (lerp (preT) * dd * (float) sr - q.pre) * k.smooth;
                     float pos = (float) q.w - q.pre; const int n = (int) q.d.size();
                     while (pos < 0) pos += (float) n;
-                    const int a0 = (int) pos; const float af = pos - (float) a0;
+                    int a0 = (int) pos; const float af = pos - (float) a0; if (a0 >= n) a0 -= n;
                     const float yd = q.d[(size_t) a0] * (1 - af) + q.d[(size_t) ((a0 + 1) % n)] * af;
                     q.lp += (yd - q.lp) * (k.ldLp[i0] + fr * (k.ldLp[i0 + 1] - k.ldLp[i0]));
                     const float yf = q.lp;
@@ -1799,6 +1821,7 @@ private:
         glHp += (m - glHp) * k.glHp;
         const float hp = m - glHp, sd = .5f * (wl - wr);
         glDet += (hp * hp + .5f * sd * sd - glDet) * k.glDet;
+        glG += (glGt - glG) * k.glSm;   // усиление скользит каждый сэмпл — без «ступенек» раз в 8 сэмплов
         if (++glCnt < 8) { wl *= glG; wr *= glG; return; }
         glCnt = 0;
         const float lev = 10.0f * std::log10 (glDet + 1e-12f);
@@ -1810,7 +1833,7 @@ private:
         else if (over > -knee * .5f) { const float q = over + knee * .5f; gr = (1 - 1 / ratio) * q * q / (2 * knee); }
         gr = std::min (gr, 10.0f);
         glGr += (gr - glGr) * 8.0f * (gr > glGr ? k.glAtk : k.glRel);
-        glG = std::pow (10.0f, (-glGr + .35f * glGr * amt) / 20.0f);   // часть ужатия возвращается подъёмом
+        glGt = std::pow (10.0f, (-glGr + .35f * glGr * amt) / 20.0f);   // часть ужатия возвращается подъёмом
         wl *= glG; wr *= glG;
         viz.glue.store (glGr);
     }
@@ -1901,6 +1924,43 @@ private:
         wl = apLow + apGL * hi + sd; wr = apLow + apGR * hi - sd;
     }
 
+    // перегруз хвоста по положению точек TAIL. Уровень нормируется огибающей — характер не зависит от громкости.
+    // Верхняя точка вниз: лента (мягко, симметрично) → лампа (чётные гармоники) → складка (густые обертона).
+    // Нижняя точка вверх: «радио» — лёгкое зерно и потеря разрядности.
+    void tailDrive (float* x)
+    {
+        if (tDrH < 1e-3f && tDrL < 1e-3f) return;
+        const float a = .5f * (std::fabs (x[0]) + std::fabs (x[1]));
+        tdEnv += (a - tdEnv) * (a > tdEnv ? k.trFast : k.trSlow);
+        const float ref = tdEnv * 2.5f + 1e-5f;
+        auto ft = [] (float v) { v = std::clamp (v, -3.0f, 3.0f); return v * (27.0f + v * v) / (27.0f + 9.0f * v * v); };
+        const bool hold = (++tdCnt >= 1 + (int) (tDrL * 5.0f)); if (hold) tdCnt = 0;
+        for (int c = 0; c < 2; ++c)
+        {
+            float y = x[c];
+            if (tDrH > 1e-3f)
+            {
+                const float u = x[c] / ref, dr = 1.0f + 2.5f * tDrH;
+                const float tape = ft (u * dr);
+                float tube = ft (u * dr + .35f * u * u * dr);
+                tdDc[c] += (tube - tdDc[c]) * k.dcOut; tube -= tdDc[c];
+                const float fold = std::sin (u * dr * 1.4f) * .8f;
+                const float w1 = std::clamp (tDrH * 2.0f, 0.0f, 1.0f), w2 = std::clamp (tDrH * 2.0f - 1.0f, 0.0f, 1.0f) * .55f;
+                const float sat = (tape + w1 * (tube - tape)) * (1 - w2) + fold * w2;
+                const float wet = sat / ft (dr) * ref;                          // громкость как у чистого
+                y += tDrH * .75f * (wet - y);
+            }
+            if (tDrL > 1e-3f)
+            {
+                if (hold) tdHold[c] = y;
+                const float q = std::pow (2.0f, 10.0f - 5.0f * tDrL) / ref;
+                const float cr = std::round (tdHold[c] * q) / q;
+                y += tDrL * .5f * (cr - y);
+            }
+            x[c] = y;
+        }
+    }
+
     void blurStage (float& wl, float& wr)
     {
         if (bf < 1e-4f) { blurPrev[0] = blurPrev[1] = 0; return; }
@@ -1985,7 +2045,7 @@ private:
 
     struct Coefs
     {
-        float apLow = 0, playMemDn = 0, ldLp[4] {}, crLp = 0, crEnv = 0, bx[4] {}, balE = 0, balG = 0, glDet = 0, glAtk = 0, glRel = 0, glHp = 0, glAvg = 0;
+        float apLow = 0, glSm = 0, playMemDn = 0, ldLp[4] {}, crLp = 0, crEnv = 0, bx[4] {}, balE = 0, balG = 0, glDet = 0, glAtk = 0, glRel = 0, glHp = 0, glAvg = 0;
         float smooth = 0, outIn = 0, brDecay = 0, morph = 0, brSlow = 0, brFollow = 0, brE = 0, fade = 0, recRate = 0, enRate = 0, limAtk = 0, limRel = 0, bloomDown = 0, bloomUp = 0;
         float envAtk = 0, envFastRel = 0, envSlowRel = 0, gateUp = 0, gateDown = 0, lfoScale = 1, walk = 0, modM0 = 0, modM1 = 0;
         float b700 = 0, b150 = 0, b2500 = 0, b1500 = 0, b4000 = 0, t1500 = 0, t400 = 0, t1000 = 0, pp = 0, tank = 0, blur = 0;
@@ -2044,7 +2104,8 @@ private:
     struct Svf { float i1 = 0, i2 = 0;
         float lp (float x, float g, float kk) { const float a1 = 1.0f / (1.0f + g * (g + kk)), a2 = g * a1, a3 = g * a2;
             const float v3 = x - i2, v1 = a1 * i1 + a2 * v3, v2 = i2 + a2 * i1 + a3 * v3; i1 = 2 * v1 - i1; i2 = 2 * v2 - i2; return v2; } };
-    Svf hiSvf[2]; float hiSh[2] {}, hiGM = 1, hiGS = 1, hiShA = 1, hiK = 1.6f, hiAmtT = 0, sHiGM = 1, sHiGS = 1, sHiSh = 1, sHiK = 1.6f, hiAmt = 0;
+    Svf hiSvf[2]; float hiP[2] {}, hiOp = 1, hiOpS = 1, hiOpT = 1, hiOpST = 1, tDrH = 0, tDrL = 0, tDrHT = 0, tDrLT = 0, tdEnv = 0, tdDc[2] {}, tdHold[2] {}; int tdCnt = 0;
+    float hiSh[2] {}, hiGM = 1, hiGS = 1, hiShA = 1, hiK = 1.6f, hiAmtT = 0, sHiGM = 1, sHiGS = 1, sHiSh = 1, sHiK = 1.6f, hiAmt = 0;
     // AUTOPAN (спрятан в DRIFT)
     float playMem = 0, playHold = 0, apPan = 0, apT = 0, apPh1 = 0, apPh2 = 0, apLow = 0, apGL = 1, apGR = 1; int apCnt = 0; long apTimer = 0;
     float agcEnv = 0, agcG = 1, chFade = 1, monoAmt = 0;
@@ -2059,7 +2120,7 @@ private:
     bool tailLoOff = false, tailHiOff = false;
     int tailCnt = 0;
     // автокоррекция середины и мягкие атаки
-    float balLp[2][4] {}, balE[5] {}, balT[5] { 1, 1, 1, 1, 1 }, balGn[5] { 1, 1, 1, 1, 1 }, glHp = 0, glDet = 0, glGr = 0, glAvg = -40, glG = 1; int balCnt = 0, glCnt = 0;
+    float balLp[2][4] {}, balE[5] {}, balT[5] { 1, 1, 1, 1, 1 }, balGn[5] { 1, 1, 1, 1, 1 }, glHp = 0, glDet = 0, glGr = 0, glAvg = -40, glG = 1, glGt = 1; int balCnt = 0, glCnt = 0;
     float clLp[2] {}, clHp[2] {}, eMid = 0, eAll = 0, gMid = 1, tFast = 0, tSlow = 0, gTr = 1;
     Rng ruinRng { 0x7f4a7c15u };
     float pinkB[2][3] {}, crackEnv[2] {}, crackAmp[2] {}, crackLp[2] {};
