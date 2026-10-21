@@ -1584,7 +1584,9 @@ private:
     void balance (float& wl, float& wr)
     {
         static const float orgB[5] = { .4f, .85f, .85f, .7f, .95f }, orgS[5] = { 4.5f, 5.5f, 5.0f, 4.0f, 6.5f };
-        const float amt = orgB[orgSel], sl = orgS[orgSel];
+        const float amt = orgB[orgSel];
+        // наклон кривой ведёт ещё и TONE: тёмные пресеты уходят глубже (до −10 дБ/окт), светлые — к воздуху (−2)
+        const float sl = std::clamp (orgS[orgSel] + (.5f - sTone) * 14.0f, 2.0f, 10.0f);
         float bnd[2][5];
         const float x[2] = { wl, wr };
         for (int c = 0; c < 2; ++c)
