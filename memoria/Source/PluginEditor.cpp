@@ -42,24 +42,24 @@ void Look::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, floa
         const float a = a0 + (a1 - a0) * (float) i / 32.0f;
         const bool lit = bip ? ((a >= juce::jmin (mid, ang) - 1e-3f) && (a <= juce::jmax (mid, ang) + 1e-3f)) : a <= ang + 1e-3f;
         const float r0 = r - (i % 4 == 0 ? 5.0f : 3.0f);
-        g.setColour (lit ? col.withAlpha (.95f) : Pal::line().brighter (.15f));
+        g.setColour (lit ? col.withAlpha (.85f) : Pal::line().brighter (.05f));
         g.drawLine (c.getCentreX() + std::sin (a) * r0, c.getCentreY() - std::cos (a) * r0,
-                    c.getCentreX() + std::sin (a) * r, c.getCentreY() - std::cos (a) * r, lit ? 2.0f : 1.2f);
+                    c.getCentreX() + std::sin (a) * r, c.getCentreY() - std::cos (a) * r, lit ? 1.3f : .8f);
     }
     // тело
     const auto body = c.reduced (r * .28f);
     juce::ColourGradient gr (Pal::panel().brighter (.12f), body.getCentreX(), body.getY(), Pal::bg(), body.getCentreX(), body.getBottom(), false);
     g.setGradientFill (gr);
     g.fillEllipse (body);
-    g.setColour (Pal::line().brighter (.2f));
-    g.drawEllipse (body, 1.0f);
+    g.setColour (Pal::line().withAlpha (.7f));
+    g.drawEllipse (body, .6f);
     // указатель
     const float pr = body.getWidth() * .5f;
     g.setColour (col);
     g.drawLine (c.getCentreX() + std::sin (ang) * pr * .25f, c.getCentreY() - std::cos (ang) * pr * .25f,
-                c.getCentreX() + std::sin (ang) * pr * .85f, c.getCentreY() - std::cos (ang) * pr * .85f, 2.2f);
-    g.setColour (col.withAlpha (.25f));
-    g.fillEllipse (juce::Rectangle<float> (7, 7).withCentre ({ c.getCentreX() + std::sin (ang) * (r + 5), c.getCentreY() - std::cos (ang) * (r + 5) }));
+                c.getCentreX() + std::sin (ang) * pr * .85f, c.getCentreY() - std::cos (ang) * pr * .85f, 1.6f);
+    g.setColour (col.withAlpha (.2f));
+    g.fillEllipse (juce::Rectangle<float> (5, 5).withCentre ({ c.getCentreX() + std::sin (ang) * (r + 5), c.getCentreY() - std::cos (ang) * (r + 5) }));
     // VARY: текущее значение гуляющего параметра
     const float eff = (float) (double) s.getProperties().getWithDefault ("eff", -1.0);
     if (eff >= 0 && std::fabs (eff - pos) > .003f)
@@ -73,7 +73,7 @@ void Look::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, floa
 void Look::drawComboBox (juce::Graphics& g, int w, int h, bool, int, int, int, int, juce::ComboBox&)
 {
     g.setColour (Pal::panel()); g.fillRoundedRectangle (0, 0, (float) w, (float) h, (float) h * .5f);
-    g.setColour (Pal::line()); g.drawRoundedRectangle (.5f, .5f, (float) w - 1, (float) h - 1, (float) h * .5f, 1);
+    g.setColour (Pal::line()); g.drawRoundedRectangle (.5f, .5f, (float) w - 1, (float) h - 1, (float) h * .5f, .7f);
     juce::Path p; p.addTriangle ((float) w - 22, (float) h * .42f, (float) w - 12, (float) h * .42f, (float) w - 17, (float) h * .62f);
     g.setColour (Pal::dim()); g.fillPath (p);
 }
@@ -124,7 +124,7 @@ void Segments::paint (juce::Graphics& g)
     const int n = labels.size();
     const auto r = getLocalBounds().toFloat().reduced (.5f);
     g.setColour (Pal::panel()); g.fillRoundedRectangle (r, r.getHeight() * .5f);
-    g.setColour (Pal::line()); g.drawRoundedRectangle (r, r.getHeight() * .5f, 1);
+    g.setColour (Pal::line()); g.drawRoundedRectangle (r, r.getHeight() * .5f, .7f);
     const float sw = r.getWidth() / (float) n;
     for (int i = 0; i < n; ++i)
     {
@@ -133,7 +133,7 @@ void Segments::paint (juce::Graphics& g)
         if (i == cur)
         {
             g.setColour (c.withAlpha (.16f)); g.fillRoundedRectangle (cell, cell.getHeight() * .5f);
-            g.setColour (c.withAlpha (.9f)); g.drawRoundedRectangle (cell, cell.getHeight() * .5f, 1.2f);
+            g.setColour (c.withAlpha (.9f)); g.drawRoundedRectangle (cell, cell.getHeight() * .5f, .8f);
         }
         else if (i == hover)
         {
@@ -171,8 +171,8 @@ void Chip::paint (juce::Graphics& g)
     const float a = kind == Action ? flash : 1.0f;
     g.setColour (on ? col.withAlpha (.14f * a + (hover ? .05f : 0)) : Pal::panel().brighter (hover ? .08f : 0));
     g.fillRoundedRectangle (r, 7);
-    g.setColour (on ? col.withAlpha (.35f + .6f * a) : Pal::line());
-    g.drawRoundedRectangle (r, 7, 1.1f);
+    g.setColour (on ? col.withAlpha (.25f + .45f * a) : Pal::line().withAlpha (.8f));
+    g.drawRoundedRectangle (r, 7, .7f);
 
     auto inner = r.reduced (10, 0);
     g.setFont (F (11, true, .08f));
@@ -442,7 +442,7 @@ void MemoryRing::paint (juce::Graphics& g)
     g.setColour (Pal::bg().withAlpha (.85f));
     g.fillEllipse (juce::Rectangle<float> (core * 2, core * 2).withCentre ({ cx, cy }));
     g.setColour (acc.withAlpha (.7f));
-    g.drawEllipse (juce::Rectangle<float> (core * 2, core * 2).withCentre ({ cx, cy }), 1.2f);
+    g.drawEllipse (juce::Rectangle<float> (core * 2, core * 2).withCentre ({ cx, cy }), .9f);
 
     // мембрана организма: дышит вместе со звуком
     if (v.organism.load() > 0)
@@ -451,6 +451,16 @@ void MemoryRing::paint (juce::Graphics& g)
         const float rr = core * (1.55f + .25f * (1 - br));
         g.setColour (acc.withAlpha (.12f + .18f * (1 - br)));
         g.drawEllipse (juce::Rectangle<float> (rr * 2, rr * 2).withCentre ({ cx, cy }), 1.0f + 2.0f * (1 - br));
+    }
+    // AUTOPAN: точка внизу ядра показывает, куда сейчас перетекает звук (DRIFT выше ~0.25)
+    {
+        const float pan = v.pan.load();
+        if (std::fabs (pan) > .01f)
+        {
+            const float px = cx + pan / .7f * core * .55f, py = cy + core * .62f;
+            g.setColour (acc.withAlpha (.18f)); g.drawLine (cx - core * .55f, py, cx + core * .55f, py, .6f);
+            g.setColour (acc.withAlpha (.85f)); g.fillEllipse (juce::Rectangle<float> (4.5f, 4.5f).withCentre ({ px, py }));
+        }
     }
     // CORE: заливка ядра по силе
     g.setColour (acc.withAlpha (.08f + .3f * coreV));
@@ -618,7 +628,7 @@ void MemoriaEditor::paint (juce::Graphics& g)
     g.drawText ("MEMORIA", 28, 12, 220, 28, juce::Justification::centredLeft);
     g.setColour (Pal::dim());
     g.setFont (F (11, false, .2f));
-    g.drawText ("afterimage engine", 30, 38, 240, 14, juce::Justification::centredLeft);
+    g.drawText ("dream engine", 30, 38, 240, 14, juce::Justification::centredLeft);
     g.setColour (acc);
     g.fillEllipse (14, 22, 7, 7);
 
@@ -667,7 +677,7 @@ void LayerPanel::paint (juce::Graphics& g)
         g.setColour (Pal::panel().withAlpha (.85f));
         g.fillRoundedRectangle (r, 8);
         g.setColour ((used ? col : Pal::line()).withAlpha (used ? .45f * act : 1.0f));
-        g.drawRoundedRectangle (r.reduced (.5f), 8, 1);
+        g.drawRoundedRectangle (r.reduced (.5f), 8, .7f);
         if (! used) { g.setColour (Pal::dim().withAlpha (.5f)); g.setFont (F (10.5f, false, .1f)); g.drawText (U ("— нет в этом режиме —"), r, juce::Justification::centred); continue; }
 
         const int semis = v.lSemis[(size_t) j].load();
@@ -774,7 +784,7 @@ void TailRange::paint (juce::Graphics& g)
     {
         g.setColour (acc); g.fillRoundedRectangle (juce::Rectangle<float> (4, b.getHeight() + 4).withCentre ({ x, b.getCentreY() }), 2);
     }
-    g.setColour (Pal::line()); g.drawRoundedRectangle (b, 6, 1);
+    g.setColour (Pal::line()); g.drawRoundedRectangle (b, 6, .7f);
 }
 
 // ============================================================ Stepper
@@ -792,7 +802,7 @@ void Stepper::paint (juce::Graphics& g)
 {
     const auto r = getLocalBounds().toFloat().reduced (.5f);
     g.setColour (Pal::panel().brighter (hover ? .06f : 0)); g.fillRoundedRectangle (r, r.getHeight() * .5f);
-    g.setColour (accent.withAlpha (.55f)); g.drawRoundedRectangle (r, r.getHeight() * .5f, 1.1f);
+    g.setColour (accent.withAlpha (.4f)); g.drawRoundedRectangle (r, r.getHeight() * .5f, .7f);
     g.setColour (Pal::dim()); g.setFont (F (8.5f, true, .14f));
     g.drawText (caption, r.withTrimmedTop (3).withHeight (10), juce::Justification::centred);
     g.setColour (accent); g.setFont (F (12.5f, true, .14f));

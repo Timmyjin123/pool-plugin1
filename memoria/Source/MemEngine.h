@@ -1,5 +1,5 @@
 #pragma once
-// Memoria — afterimage engine: звук оставляет послеобраз, который слоится, темнеет и распадается.
+// Memoria — dream engine: звук оставляет послеобраз, который слоится, темнеет и распадается.
 // Движок без зависимостей от JUCE.
 //
 // Идея: одна общая память (пул сэмплов), на которой режим раскладывает свои кольцевые линии.
@@ -382,7 +382,7 @@ struct Organism
         {
             cCnt = 16;
             cBody = op (cur.bodyHz);
-            gBody = std::pow (10.0f, cur.body * (.6f + .4f * tail) / 20.0f) - 1.0f;
+            gBody = std::pow (10.0f, cur.body * (1.0f - .5f * tail) / 20.0f) - 1.0f;   // тело — пока играешь; в хвосте низ отступает, гул не копится
             const float g = std::tan (3.14159265f * std::min (cur.dipHz, (float) sr * .45f) / (float) sr);
             dK = 1.2f; dA1 = 1 / (1 + g * (g + dK)); dA2 = g * dA1; dA3 = g * dA2;
             dGain = dK * (1.0f - std::pow (10.0f, -cur.dip / 20.0f));
@@ -809,7 +809,7 @@ public:
         subShift.prepare (sr, .10, .026, .012);     // бас: длинное окно, поиск фазы до ~38 Гц
         subShift2.prepare (sr, .12, .030, .014);
         k.bass = op (400); k.sub2 = op (90); k.monoLo = op (120);
-        k.cl300 = op (300); k.cl3000 = op (3000);
+        k.cl300 = op (300); k.cl3000 = op (3000); k.apLow = op (160); k.playMemDn = (float) (1.0 / (12.0 * sr));
         k.bx[0] = op (250); k.bx[1] = op (800); k.bx[2] = op (2500); k.bx[3] = op (6000);
         k.balE = (float) (1.0 / (2.5 * sr)); k.balG = (float) (1.0 / (1.5 * sr));
         k.glDet = (float) (1.0 / (.012 * sr)); k.glAtk = (float) (1.0 / (.018 * sr)); k.glRel = (float) (1.0 / (.32 * sr)); k.glHp = op (120); k.glAvg = (float) (1.0 / (3.0 * sr));
@@ -967,9 +967,19 @@ public:
                     auto op1 = [this] (float fc) { return (float) (1.0 - std::exp (-2.0 * 3.14159265358979 * std::min ((double) fc, sr * .45) / sr)); };
                     tLoA = fLo <= 0 ? 0.0f : op1 (fLo);
                     tHiA = (tailHiOff && natural < .02f) ? 1.0f : op1 (std::min (fHi, 20000.0f));
+                    // мягкий верх: SVF 12 дБ/окт + пологая полка заранее; бока темнее середины (глубина)
+                    const float fh = std::min (fHi, 20000.0f), nyq = (float) sr * .45f;
+                    auto tg = [this, nyq] (float f) { return (float) std::tan (3.14159265358979 * std::min (f, nyq) / sr); };
+                    hiGM = tg (fh); hiGS = tg (fh * .72f); hiShA = op1 (fh * .4f);
+                    const float lowness = std::clamp (std::log2 (16000.0f / std::max (200.0f, fh)) / 5.0f, 0.0f, 1.0f);
+                    hiK = 1.0f / (.55f + .45f * lowness);   // ниже срез — чуть больше тёплого «вокального» подъёма у среза
+                    hiAmtT = tHiA >= 1.0f ? 0.0f : 1.0f;
                 }
                 sTLo += (tLoA - sTLo) * k.smooth * 4;
                 sTHi += (tHiA - sTHi) * k.smooth * 4;
+                const float hs = k.smooth * 4;
+                sHiGM += (hiGM - sHiGM) * hs; sHiGS += (hiGS - sHiGS) * hs; sHiSh += (hiShA - sHiSh) * hs;
+                sHiK += (hiK - sHiK) * hs; hiAmt += (hiAmtT - hiAmt) * hs;
             }
             bf += (bfT - bf) * k.blur;
             lcE += (lcT - lcE) * k.enRate;
@@ -977,10 +987,14 @@ public:
             for (int c = 0; c < 2; ++c) rg[c] += (rgT[c] - rg[c]) * k.recRate;
 
             // кривая обратной связи; не выше 0.995 — петля не раскачивается сама (бесконечно держит только FREEZE)
-            const float dg = std::min (.995f, (2.0f - sDecay) * sDecay * 1.066f);
+            // память об игре: сразу вверх, вниз ~12 с. Без игры память понемногу испаряется — гул сам не держится вечно
+            playHold = std::max (playF, 1.0f - .5f * (rg[0] + rg[1]));   // FREEZE — осознанное удержание, а не «перестал играть»
+            playMem += (playHold - playMem) * (playHold > playMem ? k.playRate : k.playMemDn);
+            // кривая DECAY: вся ручка работает (раньше верхняя четверть упиралась в потолок и держала гул бесконечно)
+            const float dg = .995f * (1.0f - std::pow (1.0f - std::min (1.0f, sDecay), 1.7f)) * (1.0f - .22f * (1.0f - playMem));
             const float wd = sWarm * sWarm * sWarm;
             const float duckAmt = sDyn < .5f ? (.5f - sDyn) * 2 * (.5f - sDyn) * 2 : 0.0f;
-            const float bloomAmt = sDyn > .5f ? (sDyn - .5f) * 2 * (sDyn - .5f) * 2 : 0.0f;
+            const float bloomAmt = (sDyn > .5f ? (sDyn - .5f) * 2 * (sDyn - .5f) * 2 : 0.0f) * playMem;   // расцвет — только после игры
 
             // ---- медленные LFO со случайным темпом
             walk[0] += rng.bi() * k.walk;
@@ -1052,6 +1066,7 @@ public:
             wl += sigL; wr += sigR; sigL = sigR = 0;
             bridge (wl, wr);
             blurStage (wl, wr);
+            autopan (wl, wr);
             chaosSt.process (wl, wr, sChaos);   // всегда в цепи: включение CHAOS не сдвигает сигнал и не щёлкает
             if (sRuin > 1e-4f) { const float fl = sRuin * sRuin * .006f; wl += fl * hiss[0]; wr += fl * hiss[1]; }
             // SPACE + SHIMMER: большой зал поверх мокрого сигнала, PRISM — переливы спектра
@@ -1085,10 +1100,19 @@ public:
                 {
                     float h = x[c];
                     for (int j = 0; j < 4; ++j) { tf[c][j] += (h - tf[c][j]) * sTLo; h -= tf[c][j]; }
-                    for (int j = 4; j < 8; ++j) { tf[c][j] += (h - tf[c][j]) * sTHi; h = tf[c][j]; }
                     x[c] = h;
                 }
-                wl = x[0]; wr = x[1];
+                // верх в Mid/Side: пологая полка (−3 дБ) с октавы ниже среза, дальше 12 дБ/окт без резкого колена
+                const float m = .5f * (x[0] + x[1]), sd = .5f * (x[0] - x[1]);
+                float mm = m, ss = sd;
+                if (hiAmt > 1e-4f)
+                {
+                    hiSh[0] += (m - hiSh[0]) * sHiSh; hiSh[1] += (sd - hiSh[1]) * sHiSh;
+                    const float m1 = m - .4f * (m - hiSh[0]), s1 = sd - .5f * (sd - hiSh[1]);
+                    mm = m + hiAmt * (hiSvf[0].lp (m1, sHiGM, sHiK) - m);
+                    ss = sd + hiAmt * (hiSvf[1].lp (s1, sHiGS, sHiK) - sd);
+                }
+                wl = mm + ss; wr = mm - ss;
             }
             glue (wl, wr);
             wl *= 2.0f; wr *= 2.0f;   // подъём уровня мокрого сигнала (выходной лимитер держит пики)
@@ -1097,8 +1121,9 @@ public:
                 const float e2 = .5f * (wl * wl + wr * wr);
                 agcEnv += (e2 - agcEnv) * k.agcEnv;
                 const float rms = std::sqrt (agcEnv);
-                const float tg = rms > .18f ? std::max (.5f, .18f / rms) : 1.0f;
-                agcG += (tg - agcG) * (tg < agcG ? k.agcDown : k.agcUp);
+                const float tgtR = .18f * (.55f + .45f * playHold);   // когда не играешь, дрон держится тише (до −5 дБ)
+                const float tg = rms > tgtR ? std::max (.4f, tgtR / rms) : 1.0f;
+                agcG += (tg - agcG) * (tg < agcG ? k.agcDown : k.agcUp * (.15f + .85f * playMem));   // без игры не подтягивает хвост вверх
                 wl *= agcG; wr *= agcG;
             }
 
@@ -1134,7 +1159,7 @@ public:
         std::atomic<int> nLayers { 0 };
         std::atomic<int> chaosType { 0 }, erodeCount { 0 };
         std::atomic<float> chaosEnv { 0 }, ruin { 0 }, chaos { 0 }, lastErode { -1 };
-        std::atomic<float> glue { 0 }, space { 0 }, revLvl { 0 }, prism { 0 }, core { .5f }, breath { 1 };
+        std::atomic<float> glue { 0 }, space { 0 }, revLvl { 0 }, prism { 0 }, core { .5f }, breath { 1 }, pan { 0 };
         std::atomic<int> organism { 1 };
         std::array<std::atomic<float>, 4> lSwell {};
         std::array<std::atomic<float>, 5> prismF {};
@@ -1192,7 +1217,7 @@ private:
     // «распускающийся» компрессор: тихое поднимает до ×1.8, громкое прижимает
     float bloomGain (Deg& d, float s, float amt)
     {
-        const float t = std::max (0.0f, 1 + amt * (.8f - 1.9f * s * s));
+        const float t = std::max (0.0f, 1 + amt * (.8f - 5.0f * s * s));   // равновесие расцвета ниже (~−8 дБ): дрон не громче игры
         d.bloom += (t - d.bloom) * (t < d.bloom ? k.bloomDown : k.bloomUp);
         return d.bloom;
     }
@@ -1230,7 +1255,8 @@ private:
         d.dc += (v - d.dc) * k.dc; v -= d.dc;   // постоянная составляющая не копится в петле
         v = ruinCrush (d, v);
         v = limitStep (v, d.env, k.limAtk, k.limRel);
-        v = warm (v, wd);
+        wd *= .5f * (rg[0] + rg[1]);   // в заморозке тепло не трогает петлю — она кружит без потерь
+        if (wd > 1e-6f) v = warm (v, wd) / ((1 + wd) * (1 - .3f * wd));   // тепло в петле без подъёма тихого (иначе +2 дБ на круг — и гул, который не гаснет)
         float& cell = at (line, w[line]);
         cell = v * xf + cell * (1 - xf);
     }
@@ -1574,7 +1600,11 @@ private:
         const float tg = tFast > tSlow * 1.5f + 1e-5f ? (tSlow * 1.5f + 1e-5f) / tFast : 1.0f;
         gTr += (tg - gTr) * (tg < gTr ? k.trAtk : k.trRel);
         const float gt = 1.0f - amt * .7f * (1.0f - gTr);
-        for (int c = 0; c < 2; ++c) x[c] = (x[c] + (gm - 1.0f) * mid[c]) * gt;
+        // середина убирается в Mid/Side: из центра — полностью, бока чуть подхватывают её (звук не «в лоб», а раскрывается)
+        const float mM = .5f * (mid[0] + mid[1]), mS = .5f * (mid[0] - mid[1]);
+        const float gs = 1.0f + .4f * (1.0f - gm);
+        const float dM = (gm - 1.0f) * mM, dS = (gs - 1.0f) * mS;
+        x[0] = (x[0] + dM + dS) * gt; x[1] = (x[1] + dM - dS) * gt;
         wl = x[0]; wr = x[1];
     }
 
@@ -1615,7 +1645,14 @@ private:
         }
         for (int b = 1; b < 5; ++b) balGn[b] += (balT[b] - balGn[b]) * k.balG;
         float y[2];
-        for (int c = 0; c < 2; ++c) y[c] = bnd[c][0] + balGn[1] * bnd[c][1] + balGn[2] * bnd[c][2] + balGn[3] * bnd[c][3] + balGn[4] * bnd[c][4];
+        for (int c = 0; c < 2; ++c) y[c] = bnd[c][0] + balGn[3] * bnd[c][3] + balGn[4] * bnd[c][4];
+        // полосы середины (250 Гц – 2.5 кГц): срез идёт по центру, бока режутся вполовину — горб уходит из «лба», тело остаётся
+        for (int b = 1; b <= 2; ++b)
+        {
+            const float gM = balGn[b], gS = gM < 1.0f ? std::sqrt (gM) : gM;
+            const float M = .5f * (bnd[0][b] + bnd[1][b]), S = .5f * (bnd[0][b] - bnd[1][b]);
+            y[0] += gM * M + gS * S; y[1] += gM * M - gS * S;
+        }
         wl = y[0]; wr = y[1];
     }
 
@@ -1671,7 +1708,8 @@ private:
             subEnvSlow += (subEnv - subEnvSlow) * k.envSlowS;
             const float punch = std::min (1.6f, subEnv / (subEnvSlow + 1e-4f));
             const float gp = .55f + .55f * punch;
-            const float raw = (subLp2 * 1.4f * sDepth + s2v * 1.1f * g2) * gp;
+            const float idle = .4f + .6f * playHold;                               // без игры саб отступает, не гудит на максимуме
+            const float raw = (subLp2 * 1.4f * sDepth + s2v * 1.1f * g2) * gp * idle;
             sub = std::tanh (raw * 1.4f) / 1.4f;                               // лёгкая сатурация: саб слышен и на маленьких колонках
         }
         float x[2] = { wl, wr };
@@ -1680,7 +1718,7 @@ private:
         for (int c = 0; c < 2; ++c)
         {
             shelfLp[c] += (x[c] - shelfLp[c]) * k.shelf;
-            x[c] += sDepth * .5f * shelfLp[c] + sub;
+            x[c] += sDepth * (.2f + .3f * playHold) * shelfLp[c] + sub;
             tiltLp[c] += (x[c] - tiltLp[c]) * k.tilt;
             x[c] = tiltLp[c] * gLo + (x[c] - tiltLp[c]) * gHi;
         }
@@ -1693,6 +1731,43 @@ private:
     }
 
     // BLUR: стерео-диффузор с хвостом, размывает всё в облако
+    // AUTOPAN под капотом DRIFT (выше ~0.25): мокрый звук медленно перетекает L ↔ R, у каждого режима своя траектория.
+    // Двигается только центр выше ~160 Гц, бока и низ остаются на месте; мощность сохраняется.
+    void autopan (float& wl, float& wr)
+    {
+        const float amt = std::clamp ((sDrift - .25f) / .6f, 0.0f, 1.0f);
+        if (--apCnt <= 0)
+        {
+            apCnt = 16;
+            const float dt = 16.0f / (float) sr;
+            float tgt = 0, slew = .8f;
+            switch (curMode)
+            {
+                case 0:   // GRAINS: облако перескакивает в новое место раз в 3–7 с и плавно туда переплывает
+                    apTimer -= 16;
+                    if (apTimer <= 0) { apTimer = (long) ((3.0f + 4.0f * ruinRng.uni()) * (float) sr); apT = (apT > 0 ? -1.0f : 1.0f) * (.35f + .65f * ruinRng.uni()); }
+                    tgt = apT; slew = 2.2f; break;
+                case 1:   // DIFFUSE: медленное вращение (~26 с)
+                    apPh1 += dt * 6.2831853f / 26.0f; tgt = std::sin (apPh1); break;
+                case 2:   // NETWORK: две орбиты разной скорости — путь не повторяется
+                    apPh1 += dt * 6.2831853f / 19.0f; apPh2 += dt * 6.2831853f / 7.3f;
+                    tgt = .65f * std::sin (apPh1) + .35f * std::sin (apPh2 + 1.3f); break;
+                default:  // TAPES: звук задерживается у краёв и переплывает (~15 с)
+                    apPh1 += dt * 6.2831853f / 15.0f; tgt = std::tanh (2.2f * std::sin (apPh1)) / std::tanh (2.2f); break;
+            }
+            if (apPh1 > 6.2831853f) apPh1 -= 6.2831853f;
+            if (apPh2 > 6.2831853f) apPh2 -= 6.2831853f;
+            const float a = 1.0f - std::exp (-dt / slew);
+            apPan += (tgt * .7f * amt - apPan) * a;
+            apGL = std::sqrt (1.0f - apPan); apGR = std::sqrt (1.0f + apPan);
+        }
+        if (amt <= 1e-4f && std::fabs (apPan) < 1e-4f) return;
+        const float m = .5f * (wl + wr), sd = .5f * (wl - wr);
+        apLow += (m - apLow) * k.apLow;
+        const float hi = m - apLow;
+        wl = apLow + apGL * hi + sd; wr = apLow + apGR * hi - sd;
+    }
+
     void blurStage (float& wl, float& wr)
     {
         if (bf < 1e-4f) { blurPrev[0] = blurPrev[1] = 0; return; }
@@ -1765,7 +1840,7 @@ private:
         viz.chaosType.store (chaosSt.type); viz.chaosEnv.store (chaosSt.type == 5 ? 1.0f - chaosSt.dropG : chaosSt.m);
         viz.ruin.store (sRuin); viz.chaos.store (sChaos); viz.lastErode.store (lastErode); viz.erodeCount.store (erodeCount);
         viz.space.store (sSpace); viz.revLvl.store (revLvl); viz.prism.store (sPrism);
-        viz.core.store (sCore); viz.breath.store (organism.breath); viz.organism.store (orgSel);
+        viz.core.store (sCore); viz.pan.store (apPan); viz.breath.store (organism.breath); viz.organism.store (orgSel);
         for (int j = 0; j < 4; ++j) viz.lSwell[(size_t) j].store (swellT[j]);
         for (int j = 0; j < 5; ++j) viz.prismF[(size_t) j].store (prism.freq (j));
         for (int j = 0; j < 4; ++j)
@@ -1777,7 +1852,7 @@ private:
 
     struct Coefs
     {
-        float crLp = 0, crEnv = 0, bx[4] {}, balE = 0, balG = 0, glDet = 0, glAtk = 0, glRel = 0, glHp = 0, glAvg = 0;
+        float apLow = 0, playMemDn = 0, crLp = 0, crEnv = 0, bx[4] {}, balE = 0, balG = 0, glDet = 0, glAtk = 0, glRel = 0, glHp = 0, glAvg = 0;
         float smooth = 0, outIn = 0, brDecay = 0, morph = 0, brSlow = 0, brFollow = 0, brE = 0, fade = 0, recRate = 0, enRate = 0, limAtk = 0, limRel = 0, bloomDown = 0, bloomUp = 0;
         float envAtk = 0, envFastRel = 0, envSlowRel = 0, gateUp = 0, gateDown = 0, lfoScale = 1, walk = 0, modM0 = 0, modM1 = 0;
         float b700 = 0, b150 = 0, b2500 = 0, b1500 = 0, b4000 = 0, t1500 = 0, t400 = 0, t1000 = 0, pp = 0, tank = 0, blur = 0;
@@ -1830,6 +1905,12 @@ private:
     Prism prism;
     float sSpace = 0, sShim = 0, sPrism = 0, preDelay = 1000, shimRatio = 2, revLvl = 0;
     float tLoA = 0, tHiA = 1, sTLo = 0, sTHi = 1, tf[2][8] {};
+    struct Svf { float i1 = 0, i2 = 0;
+        float lp (float x, float g, float kk) { const float a1 = 1.0f / (1.0f + g * (g + kk)), a2 = g * a1, a3 = g * a2;
+            const float v3 = x - i2, v1 = a1 * i1 + a2 * v3, v2 = i2 + a2 * i1 + a3 * v3; i1 = 2 * v1 - i1; i2 = 2 * v2 - i2; return v2; } };
+    Svf hiSvf[2]; float hiSh[2] {}, hiGM = 1, hiGS = 1, hiShA = 1, hiK = 1.6f, hiAmtT = 0, sHiGM = 1, sHiGS = 1, sHiSh = 1, sHiK = 1.6f, hiAmt = 0;
+    // AUTOPAN (спрятан в DRIFT)
+    float playMem = 0, playHold = 0, apPan = 0, apT = 0, apPh1 = 0, apPh2 = 0, apLow = 0, apGL = 1, apGR = 1; int apCnt = 0; long apTimer = 0;
     float agcEnv = 0, agcG = 1, chFade = 1, monoAmt = 0;
     float sCore = .5f, sigL = 0, sigR = 0, tapeWow = 0, tapeFl = 0, tapeHf[2] {}, tapeHh[2] {}, tapLp[4] {};
     float grainRatios[6] { .5f, 2.0f }; int nGrainRatios = 2;

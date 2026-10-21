@@ -78,6 +78,9 @@ int main()
         { "ORGANISM OFF → GLASS",          hall,  [&] (Params& p, double t) { p.organism = t < 6 ? 0 : 3; } },
         { "HARMONY OCT → 9TH",             drone, [&] (Params& p, double t) { p.layers = .8f; p.harmony = t < 6 ? 0 : 4; } },
         { "HARMONY SUS → 7TH (шиммер)",    hall,  [&] (Params& p, double t) { p.shimmer = .6f; p.harmony = t < 6 ? 2 : 3; } },
+        { "DRIFT .9 автопанорама, смена режимов", drone, [&] (Params& p, double t) { p.drift = .9f; p.mode = t < 4 ? 0 : t < 7 ? 1 : t < 9 ? 2 : 3; } },
+        { "TAIL верх 800 → 18k (мягкий)",  hall,  [&] (Params& p, double t) { p.tailHi = (float) ramp (t, 800, 18000, 5, 5.3); } },
+        { "TAIL верх скачком 20k → 400",   flow,  [&] (Params& p, double t) { p.tailHi = t < 6 ? 20000.0f : 400.0f; } },
         { "SEED смена (DICE)",            drone, [&] (Params& p, double t) { p.layers = .8f; p.layerSeed = t < 6 ? 0 : 404; } },
     };
     // смена пресетов подряд

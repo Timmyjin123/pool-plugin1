@@ -206,6 +206,7 @@ void MemoriaProcessor::setCurrentProgram (int i)
     set ("chaos", pr.chaos); set ("ruin", pr.ruin); set ("harmony", (float) pr.harmony);
     set ("core", pr.core); set ("organism", (float) pr.organism);
     set ("space", pr.space); set ("shimmer", pr.shimmer ? 1.0f : 0.0f); set ("tailLo", pr.tailLo); set ("tailHi", pr.tailHi);
+    set ("freeze", 0.0f);   // заморозка — жест исполнения, новый пресет её отпускает
 }
 
 void MemoriaProcessor::diceLayers()
